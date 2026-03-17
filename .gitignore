@@ -1,0 +1,8 @@
+# Binaries
+discover
+
+# Exports
+exports/
+*.json
+*.csv
+*.xlsx
