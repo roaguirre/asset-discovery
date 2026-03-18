@@ -10,6 +10,8 @@ This project implements a Directed Acyclic Graph (DAG) for processing asset disc
 3. **Filtering**: Removing false positives, dead domains, or out-of-scope assets.
 4. **Exporting**: Formatting the final dataset for consumption (JSON, CSV, DB).
 
+If enrichment discovers new seeds, the engine can schedule a later follow-up collection wave using only that new frontier. This preserves acyclic stage execution inside each wave while still expanding coverage across public asset pivots.
+
 ## Usage
 
 Currently, the entrypoint is a local CLI.
@@ -19,7 +21,7 @@ Currently, the entrypoint is a local CLI.
 go build -o discover cmd/discover/main.go
 
 # Run the discovery pipeline
-./discover --seeds path/to/seeds.json --output results.json
+./discover --seeds path/to/seeds.json --outputs results.json,results.csv
 ```
 
 ## Docker Environment
@@ -28,10 +30,11 @@ For reproducibility, a Dockerfile is provided:
 
 ```bash
 docker build -t asset-discovery .
-docker run -v $(pwd):/data asset-discovery --seeds /data/seeds.json --output /data/results.json
+docker run -v $(pwd):/data asset-discovery --seeds /data/seeds.json --outputs /data/results.json,/data/results.csv
 ```
 
 ## Developing
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for design principles and data models.
 See [AGENTS.md](AGENTS.md) for how AI coding assistants should interact with this repository.
+See [docs/dag_visualization.html](docs/dag_visualization.html) for an interactive view of the scheduler-managed pipeline and topological sort behavior.
