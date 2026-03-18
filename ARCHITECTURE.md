@@ -16,14 +16,19 @@ The pipeline is designed to utilize multiple distinct collector nodes to branch 
 
 ## The DAG Pipeline
 
+The stage graph stays acyclic. When an enricher discovers a new domain or PTR target, it does not call collectors directly and it does not control the loop itself. It hands the discovered seed back to the engine scheduler, which may start another collection wave with only that new frontier.
+
 ```mermaid
 graph TD
-    A[Seeds Input] --> B(Collection Node)
+    A[Active Seed Frontier] --> B(Collection Node)
     B --> C(Enrichment Node)
-    C --> D(Filtering Node)
-    D --> E(Exporting Node)
-    E --> F[Final Assets Output]
+    C --> D{Scheduler}
+    D -->|Current wave complete| E(Filtering Node)
+    E --> F(Exporting Node)
+    F --> G[Final Assets Output]
 ```
+
+If enrichment discovers new seeds, the scheduler creates a later collection wave that starts again from a new active frontier. That later wave is scheduler behavior, not another edge inside the current DAG.
 
 ## Data Models
 
@@ -120,4 +125,4 @@ type PipelineContext struct {
 
 ## Transitioning to PubSub
 
-In the future, the `PipelineContext` will be serialized to JSON or Protobuf and published to message queues (e.g., a "collection_completed" topic), triggering the Enrichment workers independently of the Collection workers.
+In the future, the `PipelineContext` will be serialized to JSON or Protobuf and published to message queues (e.g., a "collection_completed" topic), triggering the Enrichment workers independently of the Collection workers. Newly discovered seeds should be emitted as scheduler input for a later collection wave, rather than creating direct node-to-node calls.

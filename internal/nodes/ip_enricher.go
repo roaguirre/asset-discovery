@@ -73,47 +73,27 @@ func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) 
 	wg.Wait()
 	log.Println("[IP Enricher] Finished enriching all IPs.")
 
-	// Controlled Recursion: Re-seed the pipeline with freshly discovered PTR records
-	if len(newPTRs) > 0 && pCtx.Depth < 1 { // Prevent unending iterative discovery
-		pCtx.Lock()
-		for _, ptr := range newPTRs {
-			targets := []string{ptr}
+	// Hand newly discovered domains back to the engine scheduler as the next collection frontier.
+	for _, ptr := range newPTRs {
+		targets := []string{ptr}
 
-			// Also target the registrable root domain if different (to get RDAP/Subdomains)
-			if root, err := publicsuffix.EffectiveTLDPlusOne(ptr); err == nil && root != ptr {
-				targets = append(targets, root)
+		// Also target the registrable root domain if different (to get RDAP/Subdomains)
+		if root, err := publicsuffix.EffectiveTLDPlusOne(ptr); err == nil && root != ptr {
+			targets = append(targets, root)
+		}
+
+		for _, target := range targets {
+			newSeed := models.Seed{
+				ID:          fmt.Sprintf("seed-ptr-%d", time.Now().UnixNano()),
+				CompanyName: target,
+				Domains:     []string{target},
+				Tags:        []string{"auto-discovered", "ptr-recursion"},
 			}
 
-			for _, target := range targets {
-				// Simple deduplication check against existing seeds
-				isNew := true
-				for _, existing := range pCtx.Seeds {
-					for _, d := range existing.Domains {
-						if d == target {
-							isNew = false
-							break
-						}
-					}
-					if !isNew {
-						break
-					}
-				}
-
-				if isNew {
-					log.Printf("[IP Enricher] Found novel domain via PTR: %s. Injecting as new Seed for recursion.", target)
-
-					newSeed := models.Seed{
-						ID:          fmt.Sprintf("seed-ptr-%d", time.Now().UnixNano()),
-						CompanyName: target,
-						Domains:     []string{target},
-						Tags:        []string{"auto-discovered", "ptr-recursion"},
-					}
-					pCtx.Seeds = append(pCtx.Seeds, newSeed)
-					pCtx.HasNewSeeds = true
-				}
+			if pCtx.EnqueueSeed(newSeed) {
+				log.Printf("[IP Enricher] Found novel domain via PTR: %s. Scheduling another collection wave.", target)
 			}
 		}
-		pCtx.Unlock()
 	}
 
 	return pCtx, nil

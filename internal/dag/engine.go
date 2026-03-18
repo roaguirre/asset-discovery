@@ -42,28 +42,32 @@ type Engine struct {
 	Exporters  []Exporter
 }
 
+const maxSeedExpansionDepth = 1
+
 // Run executes the DAG synchronously for local E2E testing.
 func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
-	// Controlled Recursion Loop (Max Depth: 2)
-	// We run Collectors -> Enrichers iteratively to handle natively discovered PTR/Subdomains
-	for pCtx.Depth < 2 {
-		pCtx.HasNewSeeds = false // Reset per iteration
+	// The engine may execute multiple collection waves, but the stage order remains acyclic:
+	// frontier -> collectors -> enrichers -> next frontier.
+	pCtx.InitializeSeedFrontier(maxSeedExpansionDepth)
 
+	for {
 		// 1. Run Collectors (Concurrently)
-		var wg sync.WaitGroup
-		for _, c := range e.Collectors {
-			wg.Add(1)
-			go func(col Collector) {
-				defer wg.Done()
-				_, err := col.Process(ctx, pCtx)
-				if err != nil {
-					pCtx.Lock()
-					pCtx.Errors = append(pCtx.Errors, err)
-					pCtx.Unlock()
-				}
-			}(c)
+		if len(pCtx.CollectionSeeds()) > 0 {
+			var wg sync.WaitGroup
+			for _, c := range e.Collectors {
+				wg.Add(1)
+				go func(col Collector) {
+					defer wg.Done()
+					_, err := col.Process(ctx, pCtx)
+					if err != nil {
+						pCtx.Lock()
+						pCtx.Errors = append(pCtx.Errors, err)
+						pCtx.Unlock()
+					}
+				}(c)
+			}
+			wg.Wait()
 		}
-		wg.Wait()
 
 		// 2. Run Enrichers
 		for _, en := range e.Enrichers {
@@ -74,12 +78,9 @@ func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models
 			}
 		}
 
-		// If no enrichers generated new seeds, we are done collecting. Break out contextually.
-		if !pCtx.HasNewSeeds {
+		if !pCtx.AdvanceSeedFrontier() {
 			break
 		}
-
-		pCtx.Depth++
 	}
 
 	// 3. Run Filters

@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DAG Architecture Visualization</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+  <style>
+    /* Premium aesthetics */
+    :root {
+      --bg-color: #0d1117;
+      --card-bg: rgba(22, 27, 34, 0.7);
+      --border-color: rgba(255,255,255,0.1);
+      --primary: #58a6ff;
+      --success: #3fb950;
+      --warning: #d29922;
+      --danger: #f85149;
+      --scheduler: #ff7b72;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: var(--bg-color);
+      background-image: radial-gradient(circle at top right, rgba(88,166,255,0.15), transparent 40%),
+                        radial-gradient(circle at bottom left, rgba(63,185,80,0.1), transparent 40%);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 2rem;
+      text-align: center;
+      border-bottom: 1px solid var(--border-color);
+      background: rgba(13, 17, 23, 0.5);
+      backdrop-filter: blur(10px);
+    }
+    h1 { margin: 0; font-weight: 800; font-size: 2.5rem; background: -webkit-linear-gradient(45deg, var(--primary), #a371f7); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+    p.subtitle { color: var(--text-muted); margin-top: 0.5rem; font-size: 1.1rem; }
+    
+    .container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2rem;
+      padding: 2rem;
+      flex: 1;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 2rem;
+      flex: 1 1 600px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      backdrop-filter: blur(12px);
+      position: relative;
+      overflow: hidden;
+    }
+    .card h2 { margin-top: 0; border-bottom: 2px solid rgba(255,255,255,0.05); padding-bottom: 1rem;}
+    
+    /* Specific DAG Pipeline */
+    .pipeline {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 400px;
+    }
+    
+    .nodes {
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+      width: 100%;
+      position: relative;
+      z-index: 2;
+    }
+    
+    .node {
+      background: rgba(33, 38, 45, 0.8);
+      border: 1px solid var(--primary);
+      padding: 1rem 0.75rem;
+      border-radius: 12px;
+      text-align: center;
+      width: 96px;
+      box-shadow: 0 0 15px rgba(88,166,255,0.2);
+      transition: all 0.3s ease;
+      position: relative;
+    }
+    
+    .node.collector { border-color: var(--warning); box-shadow: 0 0 20px rgba(210,153,34,0.3); }
+    .node.enricher { border-color: var(--primary); box-shadow: 0 0 20px rgba(88,166,255,0.3); }
+    .node.scheduler { border-color: var(--scheduler); box-shadow: 0 0 20px rgba(255,123,114,0.28); }
+    .node.filter { border-color: #a371f7; box-shadow: 0 0 20px rgba(163,113,247,0.3); }
+    .node.exporter { border-color: var(--success); box-shadow: 0 0 20px rgba(63,185,80,0.3); }
+    
+    .node.active { transform: scale(1.05); box-shadow: 0 0 30px currentColor; filter: brightness(1.2); }
+    
+    .node-title { font-weight: 600; margin-bottom: 0.5rem; font-size: 0.95rem; }
+    .node-desc { font-size: 0.74rem; color: var(--text-muted); line-height: 1.35; }
+
+    .frontier-note {
+      position: absolute;
+      left: 50%;
+      bottom: 2.25rem;
+      transform: translateX(-50%);
+      padding: 0.7rem 1rem;
+      border-radius: 999px;
+      border: 1px dashed rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.04);
+      color: var(--text-muted);
+      font-size: 0.76rem;
+      letter-spacing: 0.02em;
+      z-index: 2;
+      transition: all 0.3s ease;
+    }
+
+    .frontier-note.active {
+      border-color: var(--warning);
+      color: var(--warning);
+      box-shadow: 0 0 20px rgba(210,153,34,0.24);
+      background: rgba(210,153,34,0.08);
+    }
+    
+    /* SVG Edges */
+    .edges {
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      z-index: 1;
+      pointer-events: none;
+    }
+    
+    .edge {
+      fill: none;
+      stroke: rgba(255,255,255,0.15);
+      stroke-width: 3;
+      stroke-dasharray: 6;
+      animation: dash 30s linear infinite;
+    }
+    
+    @keyframes dash {
+      to { stroke-dashoffset: -1000; }
+    }
+    
+    .data-packet {
+      width: 8px; height: 8px;
+      background: #fff;
+      border-radius: 50%;
+      position: absolute;
+      box-shadow: 0 0 10px #fff, 0 0 20px var(--primary);
+      transform: translate(-50%, -50%);
+      z-index: 3;
+      opacity: 0;
+    }
+    
+    .controls { display: flex; gap: 1rem; margin-top: 2rem; justify-content: center;}
+    button {
+      background: linear-gradient(135deg, rgba(88,166,255,0.2), rgba(88,166,255,0.05));
+      border: 1px solid var(--primary);
+      color: var(--primary);
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    button:hover {
+      background: var(--primary);
+      color: #fff;
+      box-shadow: 0 0 20px rgba(88,166,255,0.4);
+    }
+    
+    /* Generic Canvas DAG */
+    .generic-dag {
+      position: relative;
+      flex: 1;
+      min-height: 400px;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0; left: 0;
+      border-radius: 12px;
+      background: rgba(0,0,0,0.2);
+    }
+
+    .topo-panel {
+      margin-top: 1rem;
+      display: grid;
+      gap: 1rem;
+    }
+
+    .topo-status {
+      background: rgba(0,0,0,0.22);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+
+    .topo-step {
+      color: var(--primary);
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 0.45rem;
+    }
+
+    .topo-message {
+      color: var(--text);
+      line-height: 1.5;
+      font-size: 0.95rem;
+    }
+
+    .topo-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+    }
+
+    .topo-box {
+      background: rgba(0,0,0,0.18);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+
+    .topo-box-title {
+      color: #e6edf3;
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+    }
+
+    .topo-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      min-height: 2rem;
+      align-items: center;
+    }
+
+    .topo-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 2rem;
+      padding: 0.35rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+    }
+
+    .topo-chip.queue {
+      border-color: rgba(210,153,34,0.5);
+      background: rgba(210,153,34,0.12);
+      color: #f2cc60;
+    }
+
+    .topo-chip.order {
+      border-color: rgba(63,185,80,0.5);
+      background: rgba(63,185,80,0.12);
+      color: #7ee787;
+    }
+
+    .topo-empty {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      font-style: italic;
+    }
+
+    .topo-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+
+    .legend-swatch {
+      width: 0.8rem;
+      height: 0.8rem;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.2);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Asset Discovery DAG Visualization</h1>
+    <p class="subtitle">Scheduler-managed DAG architecture and execution pipeline context</p>
+  </header>
+  
+  <div class="container">
+    <div class="card">
+      <h2>Thermal-Perigee Pipeline</h2>
+      <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom: 2rem;">
+        An execution flow of the DAG engine (<code>dag/engine.go</code>). Collectors gather raw data, Enrichers augment it, and the scheduler decides whether a follow-up collection wave should run with only newly discovered seeds.
+      </p>
+      
+      <div class="pipeline" id="pipeline-container">
+        <svg class="edges" id="pipeline-edges"></svg>
+        <div class="nodes" id="pipeline-nodes">
+          <div class="node collector" id="n-collector" style="color: var(--warning)">
+            <div class="node-title">Collectors</div>
+            <div class="node-desc">Gather raw data from APIs</div>
+          </div>
+          <div class="node enricher" id="n-enricher" style="color: var(--primary)">
+            <div class="node-title">Enrichers</div>
+            <div class="node-desc">DNS, IP, Provider Data</div>
+          </div>
+          <div class="node scheduler" id="n-scheduler" style="color: var(--scheduler)">
+            <div class="node-title">Scheduler</div>
+            <div class="node-desc">Queue next seed frontier</div>
+          </div>
+          <div class="node filter" id="n-filter" style="color: #a371f7">
+            <div class="node-title">Filters</div>
+            <div class="node-desc">Remove false positives</div>
+          </div>
+          <div class="node exporter" id="n-exporter" style="color: var(--success)">
+            <div class="node-title">Exporters</div>
+            <div class="node-desc">Format Final Dataset</div>
+          </div>
+        </div>
+        <div class="frontier-note" id="n-frontier">Next seed frontier queued</div>
+      </div>
+      
+      <div class="controls">
+        <button id="btn-run-wave">Run Pipeline with Follow-up Wave</button>
+        <button id="btn-run-single" style="border-color: var(--success); color: var(--success)">Run Single Pass</button>
+      </div>
+    </div>
+    
+    <div class="card">
+      <h2>Generic DAG Algorithm Viewer</h2>
+      <p style="color:var(--text-muted); font-size:0.9rem; margin-bottom: 1rem;">
+        A step-by-step view of Kahn's algorithm on an arbitrarily generated Directed Acyclic Graph. Yellow nodes have in-degree 0 and are eligible to run next.
+      </p>
+      <div class="generic-dag">
+        <canvas id="dagCanvas"></canvas>
+      </div>
+      <div class="topo-panel">
+        <div class="topo-status">
+          <div class="topo-step" id="topo-step">Initial Graph</div>
+          <div class="topo-message" id="topo-message">Each node shows its current in-degree. Start with the yellow nodes, because they have no incoming prerequisites.</div>
+        </div>
+        <div class="topo-grid">
+          <div class="topo-box">
+            <div class="topo-box-title">Queue (in-degree 0)</div>
+            <div class="topo-chip-row" id="topo-queue"></div>
+          </div>
+          <div class="topo-box">
+            <div class="topo-box-title">Topological Order</div>
+            <div class="topo-chip-row" id="topo-order"></div>
+          </div>
+        </div>
+        <div class="topo-legend">
+          <span class="legend-item"><span class="legend-swatch" style="background:#21262d;"></span>Waiting</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#9a6700;"></span>Ready (in-degree 0)</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#1f6feb;"></span>Being processed</span>
+          <span class="legend-item"><span class="legend-swatch" style="background:#238636;"></span>Processed</span>
+        </div>
+      </div>
+      <div class="controls">
+        <button id="btn-generate-dag">Randomize Graph</button>
+        <button id="btn-run-topo">Walk Kahn's Algorithm</button>
+      </div>
+    </div>
+    
+    <div class="card" style="flex: 1 1 100%;">
+      <h2>Understanding Directed Acyclic Graphs (DAGs)</h2>
+      <div class="learning-material">
+        <div class="concept">
+          <h3>What is a DAG?</h3>
+          <p>A <strong>Directed Acyclic Graph</strong> is a conceptual representation of a series of activities. The order of the activities is depicted by a graph, which is visually presented as a set of circles (nodes) and lines (edges).</p>
+          <ul>
+            <li><strong>Directed:</strong> Each edge has a defined direction (an arrow), meaning the relationships between nodes are one-way (from A to B).</li>
+            <li><strong>Acyclic:</strong> It is impossible to start at one node and follow a consistently-directed sequence of edges that loops back to the same node. There are no cycles.</li>
+            <li><strong>Graph:</strong> The overall structure made up of interconnected vertices (nodes) and edges.</li>
+          </ul>
+          <p>DAGs are heavily used in data processing pipelines, task scheduling, compilation dependencies, and version control systems like Git.</p>
+        </div>
+        
+        <div class="concept">
+          <h3>Topological Sorting</h3>
+          <p>Topological sorting is a linear ordering of a DAG's vertices such that for every directed edge <em>U &rarr; V</em>, vertex <em>U</em> comes before <em>V</em> in the ordering.</p>
+          <p>In the viewer above, each node displays its current <strong>in-degree</strong>. When a node's in-degree reaches 0, it turns yellow and appears in the queue panel. The algorithm repeatedly takes the next queued node, appends it to the output order, and subtracts 1 from each downstream node's in-degree.</p>
+          <p>In the interactive visualization above, we use <strong>Kahn's Algorithm</strong> for the topological sort:</p>
+          <ol>
+            <li>Compute the <strong>in-degree</strong> (number of incoming edges) for each node.</li>
+            <li>Identify all nodes with an in-degree of 0 (no dependencies) and add them to a queue.</li>
+            <li>While the queue is not empty:
+              <ul>
+                <li>Remove a node from the queue (mark it as "done" or "processed").</li>
+                <li>For each outgoing edge from this node, reduce the in-degree of the destination node by 1.</li>
+                <li>If the destination node's in-degree becomes 0, add it to the queue.</li>
+              </ul>
+            </li>
+          </ol>
+          <p>This ensures tasks are only executed when all their prerequisite dependencies have been met.</p>
+        </div>
+
+        <div class="concept">
+          <h3>The Thermal-Perigee Pipeline Architecture</h3>
+          <p>In this project (<code>internal/dag/engine.go</code>), the data extraction pipeline is structured as four primary processing stages coordinated by an engine scheduler:</p>
+          <ul>
+            <li><strong>Collectors:</strong> The ingestion points. They scrape APIs, OSINT sources, or passive DNS databases to gather initial raw data (like domains or IPs).</li>
+            <li><strong>Enrichers:</strong> They augment the collected assets. For example, resolving a domain to an IP, looking up BGP ASN data, or finding reverse DNS records.</li>
+            <li><strong>Scheduler:</strong> It is not a processing stage. It decides whether newly discovered domains become the next collection frontier, keeping control flow in the engine rather than in the nodes themselves.</li>
+            <li><strong>Filters:</strong> Data sanitation sequence. Dead domains, out-of-scope assets, or honeypots are dropped.</li>
+            <li><strong>Exporters:</strong> Formatting and sink stage. Cleaned data is dispatched to CSV, JSON, or a database.</li>
+          </ul>
+          <p>Each processing wave stays acyclic. If enrichment discovers new domains, the scheduler starts a later collection wave instead of introducing direct node-to-node cycles. By decoupling these stages using interfaces, the architecture remains highly modular and allows tasks to be executed efficiently in parallel.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .learning-material {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 2rem;
+      margin-top: 1rem;
+    }
+    .concept {
+      background: rgba(0,0,0,0.2);
+      padding: 1.5rem;
+      border-radius: 12px;
+      border-left: 4px solid var(--primary);
+      box-shadow: inset 0 0 20px rgba(0,0,0,0.2);
+    }
+    .concept h3 {
+      color: var(--primary);
+      margin-top: 0;
+      font-size: 1.2rem;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      padding-bottom: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .concept p, .concept ul, .concept ol {
+      color: var(--text-muted);
+      line-height: 1.6;
+      font-size: 0.95rem;
+      margin-bottom: 1rem;
+    }
+    .concept p:last-child { margin-bottom: 0; }
+    .concept strong {
+      color: #e6edf3;
+    }
+    .concept li {
+      margin-bottom: 0.5rem;
+    }
+  </style>
+
+  <script>
+    // ----------------------------------------------------------------------
+    // PIPELINE VISUALIZATION
+    // ----------------------------------------------------------------------
+    const pContainer = document.getElementById('pipeline-container');
+    const pNodes = document.getElementById('pipeline-nodes');
+    const pEdges = document.getElementById('pipeline-edges');
+    
+    const nodes = {
+      collector: document.getElementById('n-collector'),
+      enricher: document.getElementById('n-enricher'),
+      scheduler: document.getElementById('n-scheduler'),
+      frontier: document.getElementById('n-frontier'),
+      filter: document.getElementById('n-filter'),
+      exporter: document.getElementById('n-exporter')
+    };
+    
+    function getCenter(el) {
+      const rect = el.getBoundingClientRect();
+      const contRect = pContainer.getBoundingClientRect();
+      return {
+        x: rect.left - contRect.left + rect.width / 2,
+        y: rect.top - contRect.top + rect.height / 2
+      };
+    }
+    
+    let paths = {};
+    
+    function drawEdges() {
+      pEdges.innerHTML = ''; // clear
+      
+      const p1 = getCenter(nodes.collector);
+      const p2 = getCenter(nodes.enricher);
+      const p3 = getCenter(nodes.scheduler);
+      const p4 = getCenter(nodes.frontier);
+      const p5 = getCenter(nodes.filter);
+      const p6 = getCenter(nodes.exporter);
+      
+      // Defs for arrows
+      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+      const marker = `<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="rgba(255,255,255,0.4)"/></marker>`;
+      defs.innerHTML = marker;
+      pEdges.appendChild(defs);
+
+      function createPath(id, d, color='rgba(255,255,255,0.15)') {
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", d);
+        path.setAttribute("id", id);
+        path.setAttribute("class", "edge");
+        path.setAttribute("stroke", color);
+        path.setAttribute("marker-end", "url(#arrowhead)");
+        pEdges.appendChild(path);
+        return path;
+      }
+      
+      paths.c_e = createPath('path_c_e', `M ${p1.x+48} ${p1.y} C ${p1.x+80} ${p1.y}, ${p2.x-80} ${p2.y}, ${p2.x-48} ${p2.y}`);
+
+      paths.e_s = createPath('path_e_s', `M ${p2.x+48} ${p2.y} C ${p2.x+80} ${p2.y}, ${p3.x-80} ${p3.y}, ${p3.x-48} ${p3.y}`, 'var(--scheduler)');
+      paths.s_q = createPath('path_s_q', `M ${p3.x} ${p3.y+36} C ${p3.x} ${p3.y+90}, ${p4.x} ${p4.y-40}, ${p4.x} ${p4.y-18}`, 'var(--warning)');
+      paths.s_f = createPath('path_s_f', `M ${p3.x+48} ${p3.y} C ${p3.x+80} ${p3.y}, ${p5.x-80} ${p5.y}, ${p5.x-48} ${p5.y}`, '#a371f7');
+      paths.f_ex = createPath('path_f_ex', `M ${p5.x+48} ${p5.y} C ${p5.x+80} ${p5.y}, ${p6.x-80} ${p6.y}, ${p6.x-48} ${p6.y}`);
+    }
+    
+    window.addEventListener('resize', drawEdges);
+    setTimeout(drawEdges, 100);
+    
+    function animatePacket(pathNode, duration, color) {
+      return new Promise(resolve => {
+        const packet = document.createElement('div');
+        packet.className = 'data-packet';
+        if (color) packet.style.boxShadow = `0 0 10px #fff, 0 0 20px ${color}`;
+        pContainer.appendChild(packet);
+        
+        let start = null;
+        const length = pathNode.getTotalLength();
+        
+        packet.style.opacity = 1;
+        
+        function step(timestamp) {
+          if (!start) start = timestamp;
+          const progress = (timestamp - start) / duration;
+          
+          if (progress < 1) {
+            const point = pathNode.getPointAtLength(progress * length);
+            packet.style.left = point.x + 'px';
+            packet.style.top = point.y + 'px';
+            requestAnimationFrame(step);
+          } else {
+            packet.remove();
+            resolve();
+          }
+        }
+        requestAnimationFrame(step);
+      });
+    }
+
+    async function activateNode(nodeEl, ms) {
+      nodeEl.classList.add('active');
+      await new Promise(r => setTimeout(r, ms));
+      nodeEl.classList.remove('active');
+    }
+
+    async function runPipeline(withFollowUpWave) {
+      document.getElementById('btn-run-wave').disabled = true;
+      document.getElementById('btn-run-single').disabled = true;
+      
+      // Stage 1: Collectors
+      activateNode(nodes.collector, 1000);
+      await new Promise(r => setTimeout(r, 600));
+      
+      // Packets from C -> E
+      const p1 = Promise.all([
+        animatePacket(paths.c_e, 1000, 'var(--primary)'),
+        new Promise(r => setTimeout(r, 200)).then(() => animatePacket(paths.c_e, 1000, 'var(--primary)')),
+        new Promise(r => setTimeout(r, 400)).then(() => animatePacket(paths.c_e, 1000, 'var(--primary)'))
+      ]);
+      await p1;
+      
+      // Stage 2: Enrichers
+      activateNode(nodes.enricher, 1500);
+      await new Promise(r => setTimeout(r, 1000));
+      
+      await animatePacket(paths.e_s, 900, 'var(--scheduler)');
+      activateNode(nodes.scheduler, 900);
+      await new Promise(r => setTimeout(r, 500));
+
+      if (withFollowUpWave) {
+        const p2 = Promise.all([
+          animatePacket(paths.s_q, 1000, 'var(--warning)'),
+          new Promise(r => setTimeout(r, 250)).then(() => animatePacket(paths.s_q, 1000, 'var(--warning)'))
+        ]);
+        await p2;
+        await activateNode(nodes.frontier, 700);
+
+        // Follow-up wave: only newly discovered seeds are recollected.
+        activateNode(nodes.collector, 1000);
+        await new Promise(r => setTimeout(r, 600));
+        await animatePacket(paths.c_e, 1000, 'var(--primary)');
+        activateNode(nodes.enricher, 1000);
+        await new Promise(r => setTimeout(r, 600));
+        await animatePacket(paths.e_s, 900, 'var(--scheduler)');
+        activateNode(nodes.scheduler, 900);
+        await new Promise(r => setTimeout(r, 500));
+      }
+      
+      // Scheduler releases the final frontier into filtering when no more seeds remain.
+      const p3 = Promise.all([
+        animatePacket(paths.s_f, 800, '#a371f7'),
+        new Promise(r => setTimeout(r, 200)).then(() => animatePacket(paths.s_f, 800, '#a371f7'))
+      ]);
+      await p3;
+      
+      // Stage 3: Filters
+      activateNode(nodes.filter, 1000);
+      await new Promise(r => setTimeout(r, 600));
+      
+      // Packets from F -> Ex
+      await animatePacket(paths.f_ex, 800, 'var(--success)');
+      
+      // Stage 4: Exporters
+      activateNode(nodes.exporter, 1000);
+      
+      await new Promise(r => setTimeout(r, 1200));
+      document.getElementById('btn-run-wave').disabled = false;
+      document.getElementById('btn-run-single').disabled = false;
+    }
+
+    document.getElementById('btn-run-wave').addEventListener('click', () => runPipeline(true));
+    document.getElementById('btn-run-single').addEventListener('click', () => runPipeline(false));
+
+    // ----------------------------------------------------------------------
+    // GENERIC DAG GENERATOR AND TOPOLOGICAL SORT
+    // ----------------------------------------------------------------------
+    const canvas = document.getElementById('dagCanvas');
+    const ctx = canvas.getContext('2d');
+    const topoStepEl = document.getElementById('topo-step');
+    const topoMessageEl = document.getElementById('topo-message');
+    const topoQueueEl = document.getElementById('topo-queue');
+    const topoOrderEl = document.getElementById('topo-order');
+    
+    let graph = { nodes: [], edges: [] };
+    let isSorting = false;
+    let topoState = {
+      inDegree: {},
+      queue: [],
+      order: [],
+      step: 'Initial Graph',
+      message: 'Each node shows its current in-degree. Start with the yellow nodes, because they have no incoming prerequisites.'
+    };
+    
+    function resizeCanvas() {
+      const parent = canvas.parentElement;
+      canvas.width = parent.clientWidth;
+      canvas.height = parent.clientHeight;
+      drawGraph();
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function calculateInDegree() {
+      const inDegree = {};
+      graph.nodes.forEach(n => inDegree[n.id] = 0);
+      graph.edges.forEach(e => {
+        inDegree[e.to] = (inDegree[e.to] || 0) + 1;
+      });
+      return inDegree;
+    }
+
+    function queueFromInDegree(inDegree) {
+      return graph.nodes
+        .filter(n => inDegree[n.id] === 0)
+        .map(n => n.id);
+    }
+
+    function renderChipRow(el, values, variant, emptyText) {
+      if (!values.length) {
+        el.innerHTML = `<span class="topo-empty">${emptyText}</span>`;
+        return;
+      }
+
+      el.innerHTML = values
+        .map(value => `<span class="topo-chip ${variant}">${value}</span>`)
+        .join('');
+    }
+
+    function syncReadyNodes() {
+      const queued = new Set(topoState.queue);
+      graph.nodes.forEach(n => {
+        if (n.state === 'done' || n.state === 'active') {
+          return;
+        }
+        n.state = queued.has(n.id) ? 'ready' : 'idle';
+      });
+    }
+
+    function renderTopoState() {
+      topoStepEl.textContent = topoState.step;
+      topoMessageEl.textContent = topoState.message;
+      renderChipRow(topoQueueEl, topoState.queue, 'queue', 'No nodes are currently ready.');
+      renderChipRow(topoOrderEl, topoState.order, 'order', 'The output order will appear here.');
+    }
+
+    function resetTopoVisualization(message) {
+      graph.nodes.forEach(n => n.state = 'idle');
+      topoState = {
+        inDegree: calculateInDegree(),
+        queue: [],
+        order: [],
+        step: 'Initial Graph',
+        message: message || 'Each node shows its current in-degree. Start with the yellow nodes, because they have no incoming prerequisites.'
+      };
+      topoState.queue = queueFromInDegree(topoState.inDegree);
+      syncReadyNodes();
+      renderTopoState();
+      drawGraph();
+    }
+
+    function roundedRect(x, y, width, height, radius) {
+      const r = Math.min(radius, width / 2, height / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + width - r, y);
+      ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+      ctx.lineTo(x + width, y + height - r);
+      ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+      ctx.lineTo(x + r, y + height);
+      ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+    function drawBadge(x, y, text, fill, stroke, textColor) {
+      ctx.save();
+      ctx.font = '12px Inter';
+      const paddingX = 8;
+      const width = ctx.measureText(text).width + paddingX * 2;
+      const height = 22;
+      roundedRect(x - width / 2, y - height / 2, width, height, 11);
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1.5;
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = textColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, x, y + 0.5);
+      ctx.restore();
+    }
+
+    function generateDAG() {
+      if (isSorting) return;
+      const w = canvas.width;
+      const h = canvas.height;
+      if (w === 0 || h === 0) return;
+      
+      graph = { nodes: [], edges: [] };
+      
+      // Generate some nodes arranged roughly left to right to ensure Acyclicity naturally
+      const layerCount = 4;
+      let idCounter = 0;
+      
+      for(let l=0; l<layerCount; l++) {
+        let count = Math.floor(Math.random() * 2) + 2; // 2 or 3 nodes
+        for(let i=0; i<count; i++) {
+          graph.nodes.push({
+            id: idCounter++,
+            layer: l,
+            x: 100 + l * ((w - 200) / (layerCount - 1)),
+            y: 100 + i * ((h - 200) / (count)) + Math.random()*50 - 25,
+            state: 'idle' // idle, ready, active, done
+          });
+        }
+      }
+      
+      // Create random directed edges strictly strictly left to right to enforce DAG
+      for(let nodeA of graph.nodes) {
+        for(let nodeB of graph.nodes) {
+          if (nodeB.layer > nodeA.layer) {
+            // probability of edge
+            if (Math.random() < 0.3) {
+              graph.edges.push({ from: nodeA.id, to: nodeB.id });
+            }
+          }
+        }
+      }
+      
+      // Clean up standalone nodes by adding random edges from layer 0 to them if needed
+      graph.nodes.forEach(n => {
+        let hasIn = graph.edges.some(e => e.to === n.id);
+        let hasOut = graph.edges.some(e => e.from === n.id);
+        if(!hasIn && n.layer > 0) {
+          let candidates = graph.nodes.filter(c => c.layer < n.layer);
+          if(candidates.length) {
+            let src = candidates[Math.floor(Math.random()*candidates.length)];
+            graph.edges.push({from: src.id, to: n.id});
+          }
+        }
+      });
+      
+      resetTopoVisualization('Each node shows its current in-degree. Start with the yellow nodes, because they have no incoming prerequisites.');
+    }
+
+    function drawGraph() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // draw edges
+      ctx.lineWidth = 2;
+      graph.edges.forEach(edge => {
+        let A = graph.nodes.find(n => n.id === edge.from);
+        let B = graph.nodes.find(n => n.id === edge.to);
+        
+        ctx.strokeStyle = '#444c56';
+        if(A.state === 'done' && B.state === 'done') ctx.strokeStyle = 'var(--success)';
+        else if (A.state === 'done') ctx.strokeStyle = 'rgba(88,166,255,0.5)';
+        
+        drawArrow(A.x, A.y, B.x, B.y, 25);
+      });
+      
+      // draw nodes
+      graph.nodes.forEach(n => {
+        const isNext = topoState.queue[0] === n.id && n.state === 'ready';
+        const inDegree = topoState.inDegree[n.id] ?? 0;
+
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, 20, 0, Math.PI*2);
+        
+        if (n.state === 'idle') {
+          ctx.fillStyle = '#21262d';
+          ctx.strokeStyle = '#8b949e';
+        } else if (n.state === 'ready') {
+          ctx.fillStyle = '#9a6700';
+          ctx.strokeStyle = '#d29922';
+          ctx.shadowColor = '#d29922';
+          ctx.shadowBlur = 10;
+        } else if (n.state === 'active') {
+          ctx.fillStyle = '#1f6feb';
+          ctx.strokeStyle = '#58a6ff';
+          ctx.shadowColor = '#58a6ff';
+          ctx.shadowBlur = 15;
+        } else if (n.state === 'done') {
+          ctx.fillStyle = '#238636';
+          ctx.strokeStyle = '#3fb950';
+          ctx.shadowColor = 'transparent';
+        }
+        
+        ctx.lineWidth = isNext ? 4 : 3;
+        ctx.fill();
+        ctx.stroke();
+        ctx.shadowBlur = 0; // reset
+        
+        ctx.fillStyle = '#fff';
+        ctx.font = '14px Inter';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(n.id, n.x, n.y);
+
+        drawBadge(
+          n.x,
+          n.y + 34,
+          `in: ${inDegree}`,
+          n.state === 'ready' ? 'rgba(210,153,34,0.16)' : 'rgba(255,255,255,0.06)',
+          n.state === 'ready' ? 'rgba(210,153,34,0.5)' : 'rgba(255,255,255,0.15)',
+          n.state === 'ready' ? '#f2cc60' : '#c9d1d9'
+        );
+
+        if (isNext) {
+          drawBadge(n.x, n.y - 34, 'next', 'rgba(88,166,255,0.14)', 'rgba(88,166,255,0.45)', '#79c0ff');
+        }
+      });
+    }
+
+    function drawArrow(x1, y1, x2, y2, radiusOffset) {
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const startX = x1 + radiusOffset * Math.cos(angle);
+      const startY = y1 + radiusOffset * Math.sin(angle);
+      const endX = x2 - radiusOffset * Math.cos(angle);
+      const endY = y2 - radiusOffset * Math.sin(angle);
+      
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+      
+      // arrowhead
+      const headLen = 10;
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - headLen * Math.cos(angle - Math.PI / 6), endY - headLen * Math.sin(angle - Math.PI / 6));
+      ctx.lineTo(endX - headLen * Math.cos(angle + Math.PI / 6), endY - headLen * Math.sin(angle + Math.PI / 6));
+      ctx.lineTo(endX, endY);
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.fill();
+    }
+
+    async function visualizeTopoSort() {
+      if(isSorting) return;
+      isSorting = true;
+      document.getElementById('btn-generate-dag').disabled = true;
+      document.getElementById('btn-run-topo').disabled = true;
+      
+      graph.nodes.forEach(n => n.state = 'idle');
+      topoState = {
+        inDegree: calculateInDegree(),
+        queue: [],
+        order: [],
+        step: 'Step 1: Find in-degree 0 nodes',
+        message: 'Scan the graph and place every node with in-degree 0 into the queue. Those nodes are now highlighted in yellow.'
+      };
+      topoState.queue = queueFromInDegree(topoState.inDegree);
+      syncReadyNodes();
+      renderTopoState();
+      drawGraph();
+      await sleep(1100);
+
+      while(topoState.queue.length > 0) {
+        const currId = topoState.queue.shift();
+        const currNode = graph.nodes.find(n => n.id === currId);
+
+        topoState.step = `Step ${topoState.order.length + 2}: Dequeue ${currId}`;
+        topoState.message = `Take node ${currId} from the front of the queue. It is allowed to run now because it has no remaining incoming edges.`;
+        currNode.state = 'active';
+        renderTopoState();
+        drawGraph();
+        await sleep(1000);
+
+        currNode.state = 'done';
+        topoState.order = [...topoState.order, currId];
+        topoState.step = `Step ${topoState.order.length + 2}: Remove ${currId}'s outgoing edges`;
+        topoState.message = `Append ${currId} to the output order. Then subtract 1 from the in-degree of every neighbor that ${currId} points to.`;
+        renderTopoState();
+        drawGraph();
+        await sleep(700);
+
+        const outgoingEdges = graph.edges.filter(e => e.from === currId);
+        if (!outgoingEdges.length) {
+          topoState.message = `Node ${currId} has no outgoing edges, so the queue stays the same.`;
+          renderTopoState();
+          drawGraph();
+          await sleep(600);
+        }
+
+        for (const edge of outgoingEdges) {
+          topoState.inDegree[edge.to]--;
+          if (topoState.inDegree[edge.to] === 0) {
+            topoState.queue = [...topoState.queue, edge.to];
+            topoState.step = `Step ${topoState.order.length + 2}: Node ${edge.to} becomes ready`;
+            topoState.message = `Removing edge ${currId} → ${edge.to} drops node ${edge.to} to in-degree 0, so it joins the queue.`;
+          } else {
+            topoState.step = `Step ${topoState.order.length + 2}: Update in-degree for ${edge.to}`;
+            topoState.message = `Removing edge ${currId} → ${edge.to} lowers node ${edge.to} to in-degree ${topoState.inDegree[edge.to]}. It is not ready yet.`;
+          }
+          syncReadyNodes();
+          renderTopoState();
+          drawGraph();
+          await sleep(700);
+        }
+      }
+
+      topoState.step = 'Complete';
+      topoState.message = `Finished. One valid topological order is ${topoState.order.join(' → ')}. Every node appears only after its prerequisites.`;
+      renderTopoState();
+      drawGraph();
+
+      isSorting = false;
+      document.getElementById('btn-generate-dag').disabled = false;
+      document.getElementById('btn-run-topo').disabled = false;
+    }
+
+    document.getElementById('btn-generate-dag').addEventListener('click', generateDAG);
+    document.getElementById('btn-run-topo').addEventListener('click', visualizeTopoSort);
+    
+    // Init, delay slightly to ensure layout is complete
+    setTimeout(() => {
+      resizeCanvas();
+      generateDAG();
+    }, 200);
+    
+  </script>
+</body>
+</html>

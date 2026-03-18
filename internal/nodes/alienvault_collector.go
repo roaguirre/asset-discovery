@@ -37,7 +37,7 @@ func (c *AlienVaultCollector) Process(ctx context.Context, pCtx *models.Pipeline
 	var newErrors []error
 	var newAssets []models.Asset
 
-	for _, seed := range pCtx.Seeds {
+	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
 			ID:        fmt.Sprintf("enum-otx-%d", time.Now().UnixNano()),
 			SeedID:    seed.ID,

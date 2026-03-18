@@ -1,6 +1,8 @@
 package models
 
 import (
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -103,9 +105,11 @@ type PipelineContext struct {
 	Assets       []Asset
 	Errors       []error
 
-	// Recursion Bounds Control
-	Depth       int
-	HasNewSeeds bool
+	collectionSeeds    []Seed
+	pendingSeeds       []Seed
+	knownSeedKeys      map[string]struct{}
+	collectionDepth    int
+	maxCollectionDepth int
 }
 
 // Lock acquires the mutex for safe concurrent mutation of the context.
@@ -116,4 +120,98 @@ func (p *PipelineContext) Lock() {
 // Unlock releases the mutex.
 func (p *PipelineContext) Unlock() {
 	p.mu.Unlock()
+}
+
+// InitializeSeedFrontier prepares the collection scheduler with the initial seed frontier.
+func (p *PipelineContext) InitializeSeedFrontier(maxDepth int) {
+	if maxDepth < 0 {
+		maxDepth = 0
+	}
+
+	p.Lock()
+	defer p.Unlock()
+
+	p.maxCollectionDepth = maxDepth
+	p.collectionDepth = 0
+	p.pendingSeeds = nil
+	p.collectionSeeds = nil
+	p.knownSeedKeys = make(map[string]struct{}, len(p.Seeds))
+
+	for _, seed := range p.Seeds {
+		key := seedKey(seed)
+		if _, exists := p.knownSeedKeys[key]; exists {
+			continue
+		}
+
+		p.knownSeedKeys[key] = struct{}{}
+		p.collectionSeeds = append(p.collectionSeeds, seed)
+	}
+}
+
+// CollectionSeeds returns the active seed frontier for the current collection wave.
+func (p *PipelineContext) CollectionSeeds() []Seed {
+	p.Lock()
+	defer p.Unlock()
+
+	return append([]Seed(nil), p.collectionSeeds...)
+}
+
+// EnqueueSeed schedules a newly discovered seed for the next collection wave.
+func (p *PipelineContext) EnqueueSeed(seed Seed) bool {
+	p.Lock()
+	defer p.Unlock()
+
+	if p.collectionDepth >= p.maxCollectionDepth {
+		return false
+	}
+
+	key := seedKey(seed)
+	if _, exists := p.knownSeedKeys[key]; exists {
+		return false
+	}
+
+	p.knownSeedKeys[key] = struct{}{}
+	p.Seeds = append(p.Seeds, seed)
+	p.pendingSeeds = append(p.pendingSeeds, seed)
+
+	return true
+}
+
+// AdvanceSeedFrontier moves newly discovered seeds into the next collection wave.
+func (p *PipelineContext) AdvanceSeedFrontier() bool {
+	p.Lock()
+	defer p.Unlock()
+
+	if len(p.pendingSeeds) == 0 {
+		p.collectionSeeds = nil
+		return false
+	}
+
+	p.collectionDepth++
+	p.collectionSeeds = append([]Seed(nil), p.pendingSeeds...)
+	p.pendingSeeds = nil
+
+	return true
+}
+
+func seedKey(seed Seed) string {
+	company := strings.ToLower(strings.TrimSpace(seed.CompanyName))
+	domains := make([]string, 0, len(seed.Domains))
+
+	for _, domain := range seed.Domains {
+		normalized := strings.ToLower(strings.TrimSpace(domain))
+		if normalized == "" {
+			continue
+		}
+		domains = append(domains, normalized)
+	}
+
+	sort.Strings(domains)
+
+	key := company + "|" + strings.Join(domains, ",")
+	if key == "|" {
+		return strings.TrimSpace(seed.ID)
+	}
+
+	return key
 }

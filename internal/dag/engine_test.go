@@ -2,6 +2,7 @@ package dag_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"asset-discovery/internal/dag"
@@ -32,7 +33,15 @@ func TestEngine_Run(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	pCtx := &models.PipelineContext{}
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	}
 
 	resultCtx, err := engine.Run(ctx, pCtx)
 	if err != nil {
@@ -54,5 +63,66 @@ func TestEngine_Run(t *testing.T) {
 
 	if len(resultCtx.Assets) != 4 {
 		t.Errorf("expected 4 assets to be added (1 per node), got %d", len(resultCtx.Assets))
+	}
+}
+
+type frontierCollector struct {
+	seedsPerCall []int
+}
+
+func (c *frontierCollector) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	c.seedsPerCall = append(c.seedsPerCall, len(pCtx.CollectionSeeds()))
+	return pCtx, nil
+}
+
+type seedSchedulingEnricher struct {
+	callCount int
+}
+
+func (e *seedSchedulingEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	e.callCount++
+	if e.callCount == 1 {
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-2",
+			CompanyName: "ptr.example.com",
+			Domains:     []string{"ptr.example.com"},
+		})
+	}
+
+	return pCtx, nil
+}
+
+func TestEngine_Run_UsesFrontierForFollowUpCollection(t *testing.T) {
+	collector := &frontierCollector{}
+	enricher := &seedSchedulingEnricher{}
+
+	engine := &dag.Engine{
+		Collectors: []dag.Collector{collector},
+		Enrichers:  []dag.Enricher{enricher},
+	}
+
+	ctx := context.Background()
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	}
+
+	resultCtx, err := engine.Run(ctx, pCtx)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	expectedSeedsPerCall := []int{1, 1}
+	if !reflect.DeepEqual(collector.seedsPerCall, expectedSeedsPerCall) {
+		t.Fatalf("expected collector frontier sizes %v, got %v", expectedSeedsPerCall, collector.seedsPerCall)
+	}
+
+	if len(resultCtx.Seeds) != 2 {
+		t.Fatalf("expected discovered seed to be registered once, got %d seeds", len(resultCtx.Seeds))
 	}
 }

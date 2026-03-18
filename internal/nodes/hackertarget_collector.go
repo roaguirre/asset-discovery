@@ -30,7 +30,7 @@ func (c *HackerTargetCollector) Process(ctx context.Context, pCtx *models.Pipeli
 	var newErrors []error
 	var newAssets []models.Asset
 
-	for _, seed := range pCtx.Seeds {
+	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
 			ID:        fmt.Sprintf("enum-ht-%d", time.Now().UnixNano()),
 			SeedID:    seed.ID,

@@ -6,3 +6,5 @@ exports/
 *.json
 *.csv
 *.xlsx
+
+.DS_STORE
