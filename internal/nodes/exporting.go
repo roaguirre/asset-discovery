@@ -9,9 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/xuri/excelize/v2"
-	"golang.org/x/net/publicsuffix"
 
 	"asset-discovery/internal/models"
 )
@@ -27,6 +27,7 @@ func NewJSONExporter(filepath string) *JSONExporter {
 
 func (e *JSONExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	log.Printf("[JSON Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
+	markEnumerationsCompleted(pCtx, time.Now())
 
 	if err := os.MkdirAll(filepath.Dir(e.filepath), 0755); err != nil {
 		return pCtx, fmt.Errorf("failed to create directory for JSON output: %w", err)
@@ -42,12 +43,8 @@ func (e *JSONExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	// Encode JSON securely
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(pCtx.Assets); err != nil {
+	if err := encoder.Encode(buildJSONExportAssets(pCtx.Assets)); err != nil {
 		return pCtx, fmt.Errorf("failed to encode JSON output: %w", err)
-	}
-
-	for i := range pCtx.Enumerations {
-		pCtx.Enumerations[i].Status = "completed"
 	}
 
 	return pCtx, nil
@@ -64,6 +61,7 @@ func NewCSVExporter(filepath string) *CSVExporter {
 
 func (e *CSVExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	log.Printf("[CSV Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
+	markEnumerationsCompleted(pCtx, time.Now())
 
 	if err := os.MkdirAll(filepath.Dir(e.filepath), 0755); err != nil {
 		return pCtx, fmt.Errorf("failed to create directory for CSV output: %w", err)
@@ -79,19 +77,22 @@ func (e *CSVExporter) Process(ctx context.Context, pCtx *models.PipelineContext)
 	defer writer.Flush()
 
 	// Write header
-	header := []string{"Asset ID", "Type", "Identifier", "Source", "Date"}
+	header := []string{"Asset ID", "Domain Kind", "Apex Domain", "Type", "Identifier", "Source", "Date"}
 	if err := writer.Write(header); err != nil {
 		return pCtx, fmt.Errorf("failed to write CSV header: %w", err)
 	}
 
 	// Write rows
-	for _, asset := range pCtx.Assets {
+	for _, asset := range sortedAssetsForExport(pCtx.Assets) {
+		classified := classifyAsset(asset)
 		row := []string{
 			asset.ID,
+			string(classified.domainKind),
+			classified.apexDomain,
 			string(asset.Type),
 			asset.Identifier,
 			asset.Source,
-			asset.DiscoveryDate.Format("2006-01-02 15:04:05"),
+			formatDateTime(asset.DiscoveryDate),
 		}
 		if err := writer.Write(row); err != nil {
 			return pCtx, fmt.Errorf("failed to write CSV row: %w", err)
@@ -112,6 +113,7 @@ func NewXLSXExporter(filepath string) *XLSXExporter {
 
 func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	log.Printf("[XLSX Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
+	markEnumerationsCompleted(pCtx, time.Now())
 
 	if err := os.MkdirAll(filepath.Dir(e.filepath), 0755); err != nil {
 		return pCtx, fmt.Errorf("failed to create directory for XLSX output: %w", err)
@@ -121,7 +123,7 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	defer f.Close()
 
 	// Setup Sheets
-	sheetDomains := "Domains"
+	sheetDomains := "Apex Domains"
 	sheetSubdomains := "Subdomains"
 	sheetIPs := "IPs"
 	f.NewSheet(sheetDomains)
@@ -130,12 +132,12 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	f.DeleteSheet("Sheet1")
 
 	// Write Headers
-	domHeaders := []interface{}{"Asset ID", "Root Domain", "Source", "Date", "Registrar", "Created", "Updated", "Expires", "Registrant Org", "Nameservers"}
+	domHeaders := []interface{}{"Asset ID", "Apex Domain", "Source", "Date", "Registrar", "Created", "Updated", "Expires", "Registrant Org", "Nameservers"}
 	if err := f.SetSheetRow(sheetDomains, "A1", &domHeaders); err != nil {
 		return pCtx, fmt.Errorf("failed to write XLSX domain header: %w", err)
 	}
 
-	subHeaders := []interface{}{"Asset ID", "Hostname", "Source", "Date", "A Records", "AAAA Records", "CNAME", "MX", "TXT"}
+	subHeaders := []interface{}{"Asset ID", "Apex Domain", "Hostname", "Source", "Date", "A Records", "AAAA Records", "CNAME", "MX", "TXT"}
 	if err := f.SetSheetRow(sheetSubdomains, "A1", &subHeaders); err != nil {
 		return pCtx, fmt.Errorf("failed to write XLSX subdomain header: %w", err)
 	}
@@ -150,13 +152,11 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	ipRowIdx := 2
 
 	// Write rows
-	for _, asset := range pCtx.Assets {
-		if asset.Type == models.AssetTypeDomain {
-			// determine if root or subdomain
-			registrable, err := publicsuffix.EffectiveTLDPlusOne(asset.Identifier)
-			isRoot := err == nil && registrable == asset.Identifier
+	for _, asset := range sortedAssetsForExport(pCtx.Assets) {
+		classified := classifyAsset(asset)
 
-			if isRoot {
+		if asset.Type == models.AssetTypeDomain {
+			if classified.domainKind == models.DomainKindApex {
 				var registrar, created, updated, expires, registrantOrg, nsStr string
 				if asset.DomainDetails != nil && asset.DomainDetails.RDAP != nil {
 					rdap := asset.DomainDetails.RDAP
@@ -176,9 +176,9 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				row := []interface{}{
 					asset.ID,
-					asset.Identifier,
+					classified.apexDomain,
 					asset.Source,
-					asset.DiscoveryDate.Format("2006-01-02 15:04:05"),
+					formatDateTime(asset.DiscoveryDate),
 					registrar,
 					created,
 					updated,
@@ -192,7 +192,6 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 				}
 				domRowIdx++
 			} else {
-				// It's a subdomain
 				var aRecs, aaaaRecs, cnameRecs, mxRecs, txtRecs []string
 				if asset.DomainDetails != nil {
 					for _, rec := range asset.DomainDetails.Records {
@@ -213,9 +212,10 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				row := []interface{}{
 					asset.ID,
+					classified.apexDomain,
 					asset.Identifier,
 					asset.Source,
-					asset.DiscoveryDate.Format("2006-01-02 15:04:05"),
+					formatDateTime(asset.DiscoveryDate),
 					strings.Join(aRecs, ", "),
 					strings.Join(aaaaRecs, ", "),
 					strings.Join(cnameRecs, ", "),
@@ -250,7 +250,7 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 				asset.ID,
 				asset.Identifier,
 				asset.Source,
-				asset.DiscoveryDate.Format("2006-01-02 15:04:05"),
+				formatDateTime(asset.DiscoveryDate),
 				asn,
 				org,
 				ptr,

@@ -20,9 +20,16 @@ Currently, the entrypoint is a local CLI.
 # Build the project
 go build -o discover cmd/discover/main.go
 
-# Run the discovery pipeline
-./discover --seeds path/to/seeds.json --outputs results.json,results.csv
+# Run the discovery pipeline with archived default outputs
+./discover --seeds path/to/seeds.json
+
+# Or choose explicit output files
+./discover --seeds path/to/seeds.json --outputs results.json,results.csv,visualizer.html
 ```
+
+When `--outputs` is omitted, each run is archived under `exports/runs/<run-id>/` and [`exports/visualizer.html`](exports/visualizer.html) is refreshed to show the latest run by default while keeping older runs selectable.
+
+Exports separate apex domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `apex_domain` metadata, CSV includes `Domain Kind` and `Apex Domain` columns, XLSX uses dedicated `Apex Domains` and `Subdomains` sheets, and the visualizer exposes the same split as sortable/filterable columns.
 
 ## Docker Environment
 
