@@ -14,7 +14,7 @@ import (
 	"asset-discovery/internal/models"
 )
 
-func TestJSONExporter_WritesFlatAssetsWithApexDomainMetadata(t *testing.T) {
+func TestJSONExporter_WritesFlatAssetsWithRegistrableDomainMetadata(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "results.json")
 	exporter := NewJSONExporter(path)
 
@@ -36,20 +36,20 @@ func TestJSONExporter_WritesFlatAssetsWithApexDomainMetadata(t *testing.T) {
 		t.Fatalf("expected 3 exported assets, got %d", len(payload))
 	}
 
-	if payload[0].Identifier != "example.com" || payload[0].DomainKind != models.DomainKindApex || payload[0].ApexDomain != "example.com" {
-		t.Fatalf("expected first JSON row to be apex domain metadata, got %+v", payload[0])
+	if payload[0].Identifier != "example.com" || payload[0].DomainKind != models.DomainKindRegistrable || payload[0].RegistrableDomain != "example.com" {
+		t.Fatalf("expected first JSON row to be registrable domain metadata, got %+v", payload[0])
 	}
 
-	if payload[1].Identifier != "api.example.com" || payload[1].DomainKind != models.DomainKindSubdomain || payload[1].ApexDomain != "example.com" {
+	if payload[1].Identifier != "api.example.com" || payload[1].DomainKind != models.DomainKindSubdomain || payload[1].RegistrableDomain != "example.com" {
 		t.Fatalf("expected second JSON row to be subdomain metadata, got %+v", payload[1])
 	}
 
-	if payload[2].Identifier != "203.0.113.10" || payload[2].DomainKind != "" || payload[2].ApexDomain != "" {
+	if payload[2].Identifier != "203.0.113.10" || payload[2].DomainKind != "" || payload[2].RegistrableDomain != "" {
 		t.Fatalf("expected third JSON row to be IP metadata, got %+v", payload[2])
 	}
 }
 
-func TestCSVExporter_WritesDomainKindAndApexDomainColumns(t *testing.T) {
+func TestCSVExporter_WritesDomainKindAndRegistrableDomainColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "results.csv")
 	exporter := NewCSVExporter(path)
 
@@ -68,7 +68,7 @@ func TestCSVExporter_WritesDomainKindAndApexDomainColumns(t *testing.T) {
 		t.Fatalf("expected CSV output to parse, got %v", err)
 	}
 
-	expectedHeader := []string{"Asset ID", "Domain Kind", "Apex Domain", "Type", "Identifier", "Source", "Date"}
+	expectedHeader := []string{"Asset ID", "Domain Kind", "Registrable Domain", "Type", "Identifier", "Source", "Date"}
 	if len(rows) != 4 {
 		t.Fatalf("expected 4 CSV rows including header, got %d", len(rows))
 	}
@@ -79,8 +79,8 @@ func TestCSVExporter_WritesDomainKindAndApexDomainColumns(t *testing.T) {
 		}
 	}
 
-	if rows[1][1] != string(models.DomainKindApex) || rows[1][2] != "example.com" || rows[1][4] != "example.com" {
-		t.Fatalf("expected first data row to be grouped apex domain, got %+v", rows[1])
+	if rows[1][1] != string(models.DomainKindRegistrable) || rows[1][2] != "example.com" || rows[1][4] != "example.com" {
+		t.Fatalf("expected first data row to be grouped registrable domain, got %+v", rows[1])
 	}
 
 	if rows[2][1] != string(models.DomainKindSubdomain) || rows[2][2] != "example.com" || rows[2][4] != "api.example.com" {
@@ -92,7 +92,7 @@ func TestCSVExporter_WritesDomainKindAndApexDomainColumns(t *testing.T) {
 	}
 }
 
-func TestXLSXExporter_SeparatesApexDomainsAndSubdomains(t *testing.T) {
+func TestXLSXExporter_SeparatesRegistrableDomainsAndSubdomains(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "results.xlsx")
 	exporter := NewXLSXExporter(path)
 
@@ -106,10 +106,10 @@ func TestXLSXExporter_SeparatesApexDomainsAndSubdomains(t *testing.T) {
 	}
 	defer f.Close()
 
-	if rows, err := f.GetRows("Apex Domains"); err != nil {
-		t.Fatalf("expected Apex Domains sheet to exist, got %v", err)
+	if rows, err := f.GetRows("Registrable Domains"); err != nil {
+		t.Fatalf("expected Registrable Domains sheet to exist, got %v", err)
 	} else if len(rows) < 2 || len(rows[1]) < 2 || rows[1][1] != "example.com" {
-		t.Fatalf("expected example.com in Apex Domains sheet, got %+v", rows)
+		t.Fatalf("expected example.com in Registrable Domains sheet, got %+v", rows)
 	}
 
 	if rows, err := f.GetRows("Subdomains"); err != nil {

@@ -77,7 +77,7 @@ func (e *CSVExporter) Process(ctx context.Context, pCtx *models.PipelineContext)
 	defer writer.Flush()
 
 	// Write header
-	header := []string{"Asset ID", "Domain Kind", "Apex Domain", "Type", "Identifier", "Source", "Date"}
+	header := []string{"Asset ID", "Domain Kind", "Registrable Domain", "Type", "Identifier", "Source", "Date"}
 	if err := writer.Write(header); err != nil {
 		return pCtx, fmt.Errorf("failed to write CSV header: %w", err)
 	}
@@ -88,7 +88,7 @@ func (e *CSVExporter) Process(ctx context.Context, pCtx *models.PipelineContext)
 		row := []string{
 			asset.ID,
 			string(classified.domainKind),
-			classified.apexDomain,
+			classified.registrableDomain,
 			string(asset.Type),
 			asset.Identifier,
 			asset.Source,
@@ -123,7 +123,7 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	defer f.Close()
 
 	// Setup Sheets
-	sheetDomains := "Apex Domains"
+	sheetDomains := "Registrable Domains"
 	sheetSubdomains := "Subdomains"
 	sheetIPs := "IPs"
 	f.NewSheet(sheetDomains)
@@ -132,12 +132,12 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	f.DeleteSheet("Sheet1")
 
 	// Write Headers
-	domHeaders := []interface{}{"Asset ID", "Apex Domain", "Source", "Date", "Registrar", "Created", "Updated", "Expires", "Registrant Org", "Nameservers"}
+	domHeaders := []interface{}{"Asset ID", "Registrable Domain", "Source", "Date", "Registrar", "Created", "Updated", "Expires", "Registrant Org", "Nameservers"}
 	if err := f.SetSheetRow(sheetDomains, "A1", &domHeaders); err != nil {
 		return pCtx, fmt.Errorf("failed to write XLSX domain header: %w", err)
 	}
 
-	subHeaders := []interface{}{"Asset ID", "Apex Domain", "Hostname", "Source", "Date", "A Records", "AAAA Records", "CNAME", "MX", "TXT"}
+	subHeaders := []interface{}{"Asset ID", "Registrable Domain", "Hostname", "Source", "Date", "A Records", "AAAA Records", "CNAME", "MX", "TXT"}
 	if err := f.SetSheetRow(sheetSubdomains, "A1", &subHeaders); err != nil {
 		return pCtx, fmt.Errorf("failed to write XLSX subdomain header: %w", err)
 	}
@@ -156,7 +156,7 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 		classified := classifyAsset(asset)
 
 		if asset.Type == models.AssetTypeDomain {
-			if classified.domainKind == models.DomainKindApex {
+			if classified.domainKind == models.DomainKindRegistrable {
 				var registrar, created, updated, expires, registrantOrg, nsStr string
 				if asset.DomainDetails != nil && asset.DomainDetails.RDAP != nil {
 					rdap := asset.DomainDetails.RDAP
@@ -176,7 +176,7 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				row := []interface{}{
 					asset.ID,
-					classified.apexDomain,
+					classified.registrableDomain,
 					asset.Source,
 					formatDateTime(asset.DiscoveryDate),
 					registrar,
@@ -212,7 +212,7 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				row := []interface{}{
 					asset.ID,
-					classified.apexDomain,
+					classified.registrableDomain,
 					asset.Identifier,
 					asset.Source,
 					formatDateTime(asset.DiscoveryDate),

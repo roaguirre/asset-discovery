@@ -79,8 +79,8 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		t.Fatalf("expected visualizer row to classify api.example.com as subdomain, got %+v", firstSnapshot.Rows[0])
 	}
 
-	if firstSnapshot.Rows[0].ApexDomain != "example.com" {
-		t.Fatalf("expected visualizer row apex domain to be example.com, got %+v", firstSnapshot.Rows[0])
+	if firstSnapshot.Rows[0].RegistrableDomain != "example.com" {
+		t.Fatalf("expected visualizer row registrable domain to be example.com, got %+v", firstSnapshot.Rows[0])
 	}
 
 	htmlData, err := os.ReadFile(htmlPath)
@@ -89,7 +89,7 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 	}
 
 	html := string(htmlData)
-	for _, needle := range []string{"run-1", "run-2", "api.example.com", "app.example.com", "Domain Kind", "Apex Domain"} {
+	for _, needle := range []string{"run-1", "run-2", "api.example.com", "app.example.com", "Domain Kind", "Registrable Domain"} {
 		if !strings.Contains(html, needle) {
 			t.Fatalf("expected rendered HTML to contain %q", needle)
 		}

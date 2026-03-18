@@ -98,17 +98,17 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 		enum := enumByID[asset.EnumerationID]
 		classified := classifyAsset(asset)
 		rows = append(rows, models.VisualizerRow{
-			AssetID:       asset.ID,
-			Identifier:    asset.Identifier,
-			AssetType:     string(asset.Type),
-			DomainKind:    string(classified.domainKind),
-			ApexDomain:    classified.apexDomain,
-			Source:        asset.Source,
-			EnumerationID: asset.EnumerationID,
-			SeedID:        enum.SeedID,
-			Status:        enum.Status,
-			DiscoveryDate: asset.DiscoveryDate,
-			Details:       buildVisualizerDetails(asset),
+			AssetID:           asset.ID,
+			Identifier:        asset.Identifier,
+			AssetType:         string(asset.Type),
+			DomainKind:        string(classified.domainKind),
+			RegistrableDomain: classified.registrableDomain,
+			Source:            asset.Source,
+			EnumerationID:     asset.EnumerationID,
+			SeedID:            enum.SeedID,
+			Status:            enum.Status,
+			DiscoveryDate:     asset.DiscoveryDate,
+			Details:           buildVisualizerDetails(asset),
 		})
 	}
 
@@ -116,8 +116,8 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 		if visualizerRowGroup(rows[i]) != visualizerRowGroup(rows[j]) {
 			return visualizerRowGroup(rows[i]) < visualizerRowGroup(rows[j])
 		}
-		if rows[i].ApexDomain != rows[j].ApexDomain {
-			return rows[i].ApexDomain < rows[j].ApexDomain
+		if rows[i].RegistrableDomain != rows[j].RegistrableDomain {
+			return rows[i].RegistrableDomain < rows[j].RegistrableDomain
 		}
 		if rows[i].DiscoveryDate.Equal(rows[j].DiscoveryDate) {
 			return rows[i].Identifier < rows[j].Identifier
@@ -142,8 +142,8 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 func visualizerRowGroup(row models.VisualizerRow) int {
 	if row.AssetType == string(models.AssetTypeDomain) {
 		switch row.DomainKind {
-		case string(models.DomainKindApex):
-			return exportGroupApexDomain
+		case string(models.DomainKindRegistrable):
+			return exportGroupRegistrableDomain
 		case string(models.DomainKindSubdomain):
 			return exportGroupSubdomain
 		}
@@ -617,7 +617,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       </div>
       <div class="field">
         <label for="search-input">Search</label>
-        <input id="search-input" type="search" placeholder="Filter identifier, apex domain, details, source, seed, or enumeration">
+        <input id="search-input" type="search" placeholder="Filter identifier, registrable domain, details, source, seed, or enumeration">
       </div>
       <div class="field">
         <label for="type-filter">Asset Type</label>
@@ -677,7 +677,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
             <tr>
               <th><button type="button" data-key="identifier">Identifier</button></th>
               <th><button type="button" data-key="domain_kind">Domain Kind</button></th>
-              <th><button type="button" data-key="apex_domain">Apex Domain</button></th>
+              <th><button type="button" data-key="registrable_domain">Registrable Domain</button></th>
               <th><button type="button" data-key="asset_type">Type</button></th>
               <th><button type="button" data-key="source">Source</button></th>
               <th><button type="button" data-key="enumeration_id">Enumeration</button></th>
@@ -808,7 +808,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           return normalize([
             row.identifier,
             row.domain_kind,
-            row.apex_domain,
+            row.registrable_domain,
             row.asset_type,
             row.source,
             row.enumeration_id,
@@ -858,13 +858,13 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         const domainKind = row.domain_kind
           ? "<span class=\"pill\">" + escapeHTML(formatDomainKind(row.domain_kind)) + "</span>"
           : "<span class=\"muted\">-</span>";
-        const apexDomain = row.apex_domain
-          ? escapeHTML(row.apex_domain)
+        const registrableDomain = row.registrable_domain
+          ? escapeHTML(row.registrable_domain)
           : "<span class=\"muted\">-</span>";
         tr.innerHTML = [
           "<td><strong>", escapeHTML(row.identifier), "</strong><br><span class=\"muted\">", escapeHTML(row.asset_id), "</span></td>",
           "<td>", domainKind, "</td>",
-          "<td>", apexDomain, "</td>",
+          "<td>", registrableDomain, "</td>",
           "<td><span class=\"pill\">", escapeHTML(row.asset_type || "unknown"), "</span></td>",
           "<td>", escapeHTML(row.source), "</td>",
           "<td>", escapeHTML(row.enumeration_id), "</td>",
@@ -903,7 +903,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         const labels = {
           identifier: "Identifier",
           domain_kind: "Domain Kind",
-          apex_domain: "Apex Domain",
+          registrable_domain: "Registrable Domain",
           asset_type: "Type",
           source: "Source",
           enumeration_id: "Enumeration",

@@ -11,13 +11,13 @@ import (
 )
 
 type classifiedAsset struct {
-	exportGroup int
-	domainKind  models.DomainKind
-	apexDomain  string
+	exportGroup       int
+	domainKind        models.DomainKind
+	registrableDomain string
 }
 
 const (
-	exportGroupApexDomain = iota
+	exportGroupRegistrableDomain = iota
 	exportGroupSubdomain
 	exportGroupIP
 )
@@ -29,23 +29,23 @@ func classifyAsset(asset models.Asset) classifiedAsset {
 	case models.AssetTypeDomain:
 		normalized := normalizeDomainIdentifier(asset.Identifier)
 		if normalized == "" {
-			classified.exportGroup = exportGroupApexDomain
-			classified.domainKind = models.DomainKindApex
+			classified.exportGroup = exportGroupRegistrableDomain
+			classified.domainKind = models.DomainKindRegistrable
 			return classified
 		}
 
-		apexDomain, err := publicsuffix.EffectiveTLDPlusOne(normalized)
+		registrableDomain, err := publicsuffix.EffectiveTLDPlusOne(normalized)
 		if err != nil {
-			classified.exportGroup = exportGroupApexDomain
-			classified.domainKind = models.DomainKindApex
-			classified.apexDomain = normalized
+			classified.exportGroup = exportGroupRegistrableDomain
+			classified.domainKind = models.DomainKindRegistrable
+			classified.registrableDomain = normalized
 			return classified
 		}
 
-		classified.apexDomain = apexDomain
-		if apexDomain == normalized {
-			classified.exportGroup = exportGroupApexDomain
-			classified.domainKind = models.DomainKindApex
+		classified.registrableDomain = registrableDomain
+		if registrableDomain == normalized {
+			classified.exportGroup = exportGroupRegistrableDomain
+			classified.domainKind = models.DomainKindRegistrable
 			return classified
 		}
 
@@ -67,9 +67,9 @@ func buildJSONExportAssets(assets []models.Asset) []models.ExportAsset {
 	for _, asset := range sortedAssetsForExport(assets) {
 		classified := classifyAsset(asset)
 		exported = append(exported, models.ExportAsset{
-			Asset:      asset,
-			DomainKind: classified.domainKind,
-			ApexDomain: classified.apexDomain,
+			Asset:             asset,
+			DomainKind:        classified.domainKind,
+			RegistrableDomain: classified.registrableDomain,
 		})
 	}
 
@@ -87,8 +87,8 @@ func sortedAssetsForExport(assets []models.Asset) []models.Asset {
 			return left.exportGroup < right.exportGroup
 		}
 
-		if left.apexDomain != right.apexDomain {
-			return left.apexDomain < right.apexDomain
+		if left.registrableDomain != right.registrableDomain {
+			return left.registrableDomain < right.registrableDomain
 		}
 
 		leftID := normalizeDomainIdentifier(sorted[i].Identifier)

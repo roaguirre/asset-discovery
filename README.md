@@ -29,7 +29,7 @@ go build -o discover cmd/discover/main.go
 
 When `--outputs` is omitted, each run is archived under `exports/runs/<run-id>/` and [`exports/visualizer.html`](exports/visualizer.html) is refreshed to show the latest run by default while keeping older runs selectable.
 
-Exports separate apex domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `apex_domain` metadata, CSV includes `Domain Kind` and `Apex Domain` columns, XLSX uses dedicated `Apex Domains` and `Subdomains` sheets, and the visualizer exposes the same split as sortable/filterable columns.
+Exports separate registrable domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `registrable_domain` metadata, CSV includes `Domain Kind` and `Registrable Domain` columns, XLSX uses dedicated `Registrable Domains` and `Subdomains` sheets, and the visualizer exposes the same split as sortable/filterable columns.
 
 ## Docker Environment
 
