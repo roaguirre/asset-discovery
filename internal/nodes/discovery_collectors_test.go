@@ -296,7 +296,7 @@ func TestWebHintCollector_SkipsLowConfidenceJudgeDecision(t *testing.T) {
 			{
 				Root:       "example-low-confidence.com",
 				Kind:       "llm_link",
-				Confidence: 0.79,
+				Confidence: 0.49,
 			},
 		},
 	}

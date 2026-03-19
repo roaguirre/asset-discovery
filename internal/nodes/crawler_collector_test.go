@@ -173,7 +173,7 @@ func TestCrawlerCollector_SkipsLowConfidenceJudgedOutboundRoot(t *testing.T) {
 			{
 				Root:       "example-low-confidence.com",
 				Kind:       "ownership_judged",
-				Confidence: 0.78,
+				Confidence: 0.49,
 			},
 		},
 	}
