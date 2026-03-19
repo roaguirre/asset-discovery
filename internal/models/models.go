@@ -65,12 +65,13 @@ const (
 // Filtering processes will evaluate records (e.g., checking if CNAMEs point to known SaaS providers)
 // to determine true relevance and scope.
 type Asset struct {
-	ID            string    `json:"id"`
-	EnumerationID string    `json:"enumeration_id"` // Links the asset to a specific enumeration run.
-	Type          AssetType `json:"type"`           // e.g., "domain", "ip"
-	Identifier    string    `json:"identifier"`     // e.g., "api.google.com" or "192.168.1.100"
-	Source        string    `json:"source"`         // Where was this found? (e.g., "dns_collector", "subfinder")
-	DiscoveryDate time.Time `json:"discovery_date"`
+	ID            string            `json:"id"`
+	EnumerationID string            `json:"enumeration_id"` // Links the asset to a specific enumeration run.
+	Type          AssetType         `json:"type"`           // e.g., "domain", "ip"
+	Identifier    string            `json:"identifier"`     // e.g., "api.google.com" or "192.168.1.100"
+	Source        string            `json:"source"`         // Where was this found? (e.g., "dns_collector", "subfinder")
+	DiscoveryDate time.Time         `json:"discovery_date"`
+	Provenance    []AssetProvenance `json:"provenance,omitempty"`
 
 	// Type-specific details. Only the relevant struct will be populated.
 	DomainDetails *DomainDetails `json:"domain_details,omitempty"`
@@ -78,6 +79,14 @@ type Asset struct {
 
 	// EnrichmentData contains flexible attributes such as port scan results or HTTP titles.
 	EnrichmentData map[string]interface{} `json:"enrichment_data,omitempty"`
+}
+
+// AssetProvenance tracks the contributing raw observations that were merged into an asset.
+type AssetProvenance struct {
+	AssetID       string    `json:"asset_id,omitempty"`
+	EnumerationID string    `json:"enumeration_id,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	DiscoveryDate time.Time `json:"discovery_date,omitempty"`
 }
 
 // RDAPData represents domain registration data from the RDAP protocol.

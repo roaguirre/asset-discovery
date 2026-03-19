@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"log"
+	"sort"
 	"strings" // Added for strings.Contains
 
 	"asset-discovery/internal/discovery"
@@ -29,6 +30,7 @@ func (f *MergeFilter) Process(ctx context.Context, pCtx *models.PipelineContext)
 		if !ok {
 			// First time we see this asset string, copy it into the map
 			cp := a
+			cp.Provenance = mergeAssetProvenance(cp.Provenance, assetProvenanceFromAsset(a))
 			mergedAssets[assetKey] = &cp
 
 			// Initialize empty EnrichmentData map if it's nil so we can merge values later
@@ -44,6 +46,8 @@ func (f *MergeFilter) Process(ctx context.Context, pCtx *models.PipelineContext)
 		if !strings.Contains(existing.Source, a.Source) {
 			existing.Source = existing.Source + ", " + a.Source
 		}
+		existing.Provenance = mergeAssetProvenance(existing.Provenance, a.Provenance...)
+		existing.Provenance = mergeAssetProvenance(existing.Provenance, assetProvenanceFromAsset(a))
 
 		// 2. Merge Domain Details (Records, RDAP)
 		if a.DomainDetails != nil {
@@ -96,6 +100,56 @@ func (f *MergeFilter) Process(ctx context.Context, pCtx *models.PipelineContext)
 	log.Printf("[Merge Filter] Compressed pipeline from %d raw records down to %d unique merged assets.", len(pCtx.Assets), len(finalAssets))
 	pCtx.Assets = finalAssets
 	return pCtx, nil
+}
+
+func assetProvenanceFromAsset(asset models.Asset) models.AssetProvenance {
+	return models.AssetProvenance{
+		AssetID:       strings.TrimSpace(asset.ID),
+		EnumerationID: strings.TrimSpace(asset.EnumerationID),
+		Source:        strings.TrimSpace(asset.Source),
+		DiscoveryDate: asset.DiscoveryDate,
+	}
+}
+
+func mergeAssetProvenance(existing []models.AssetProvenance, incoming ...models.AssetProvenance) []models.AssetProvenance {
+	merged := append([]models.AssetProvenance(nil), existing...)
+	index := make(map[string]int, len(merged))
+	for i, item := range merged {
+		index[assetProvenanceKey(item)] = i
+	}
+
+	for _, item := range incoming {
+		if item.AssetID == "" && item.EnumerationID == "" && item.Source == "" && item.DiscoveryDate.IsZero() {
+			continue
+		}
+
+		key := assetProvenanceKey(item)
+		if _, exists := index[key]; exists {
+			continue
+		}
+
+		index[key] = len(merged)
+		merged = append(merged, item)
+	}
+
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].DiscoveryDate.Equal(merged[j].DiscoveryDate) {
+			return assetProvenanceKey(merged[i]) < assetProvenanceKey(merged[j])
+		}
+		if merged[i].DiscoveryDate.IsZero() {
+			return false
+		}
+		if merged[j].DiscoveryDate.IsZero() {
+			return true
+		}
+		return merged[i].DiscoveryDate.Before(merged[j].DiscoveryDate)
+	})
+
+	return merged
+}
+
+func assetProvenanceKey(item models.AssetProvenance) string {
+	return item.AssetID + "|" + item.EnumerationID + "|" + item.Source + "|" + item.DiscoveryDate.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
 }
 
 func mergeRDAPData(existing, incoming *models.RDAPData) {

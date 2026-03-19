@@ -94,10 +94,17 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 		enumByID[enum.ID] = enum
 	}
 
+	seedByID := make(map[string]models.Seed, len(pCtx.Seeds))
+	for _, seed := range pCtx.Seeds {
+		seedByID[seed.ID] = seed
+	}
+
 	rows := make([]models.VisualizerRow, 0, len(pCtx.Assets))
+	tracesByAssetID := make(map[string]models.VisualizerTrace, len(pCtx.Assets))
 	for _, asset := range exportutil.SortedAssetsForExport(pCtx.Assets) {
-		enum := enumByID[asset.EnumerationID]
 		classified := exportutil.ClassifyAsset(asset)
+		contributors := buildVisualizerTraceContributors(asset, enumByID, seedByID)
+		tracePath := buildVisualizerTracePath(runID, asset.ID)
 		rows = append(rows, models.VisualizerRow{
 			AssetID:           asset.ID,
 			Identifier:        asset.Identifier,
@@ -105,12 +112,14 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 			DomainKind:        string(classified.DomainKind),
 			RegistrableDomain: classified.RegistrableDomain,
 			Source:            asset.Source,
-			EnumerationID:     asset.EnumerationID,
-			SeedID:            enum.SeedID,
-			Status:            enum.Status,
+			EnumerationID:     summarizeTraceContributorValues(contributors, func(item models.VisualizerTraceContributor) string { return item.EnumerationID }),
+			SeedID:            summarizeTraceContributorValues(contributors, func(item models.VisualizerTraceContributor) string { return item.SeedID }),
+			Status:            summarizeTraceStatus(asset, contributors, enumByID),
 			DiscoveryDate:     asset.DiscoveryDate,
 			Details:           buildVisualizerDetails(asset),
+			TracePath:         tracePath,
 		})
+		tracesByAssetID[asset.ID] = buildVisualizerTrace(asset, classified, contributors, enumByID, seedByID)
 	}
 
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -126,6 +135,16 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 		return rows[i].DiscoveryDate.After(rows[j].DiscoveryDate)
 	})
 
+	traces := make([]models.VisualizerTrace, 0, len(rows))
+	for _, row := range rows {
+		trace, ok := tracesByAssetID[row.AssetID]
+		if !ok {
+			continue
+		}
+		trace.Related = buildVisualizerTraceLinks(runID, row, rows)
+		traces = append(traces, trace)
+	}
+
 	return models.VisualizerRun{
 		VisualizerRunSummary: models.VisualizerRunSummary{
 			ID:               runID,
@@ -136,7 +155,8 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 			SeedCount:        len(pCtx.Seeds),
 			Downloads:        downloads,
 		},
-		Rows: rows,
+		Rows:   rows,
+		Traces: traces,
 	}
 }
 
@@ -207,6 +227,433 @@ func buildVisualizerDetails(asset models.Asset) string {
 	}
 
 	return strings.Join(parts, " | ")
+}
+
+func buildVisualizerTracePath(runID, assetID string) string {
+	return "#trace/" + runID + "/" + assetID
+}
+
+func buildVisualizerTrace(asset models.Asset, classified exportutil.ClassifiedAsset, contributors []models.VisualizerTraceContributor, enumByID map[string]models.Enumeration, seedByID map[string]models.Seed) models.VisualizerTrace {
+	trace := models.VisualizerTrace{
+		AssetID:           asset.ID,
+		Identifier:        asset.Identifier,
+		AssetType:         string(asset.Type),
+		Source:            asset.Source,
+		EnumerationID:     summarizeTraceContributorValues(contributors, func(item models.VisualizerTraceContributor) string { return item.EnumerationID }),
+		SeedID:            summarizeTraceContributorValues(contributors, func(item models.VisualizerTraceContributor) string { return item.SeedID }),
+		DomainKind:        string(classified.DomainKind),
+		RegistrableDomain: classified.RegistrableDomain,
+		Contributors:      contributors,
+	}
+
+	identityItems := []string{
+		"Asset ID: " + asset.ID,
+		"Asset type: " + string(asset.Type),
+		"Collected from: " + asset.Source,
+	}
+	if len(contributors) > 1 {
+		identityItems = append(identityItems, fmt.Sprintf("Merged contributors: %d", len(contributors)))
+	}
+	if !asset.DiscoveryDate.IsZero() {
+		identityItems = append(identityItems, "Discovered at: "+exportutil.FormatDateTime(asset.DiscoveryDate))
+	}
+	if classified.DomainKind != "" {
+		identityItems = append(identityItems, "Domain kind: "+formatTraceLabel(string(classified.DomainKind)))
+	}
+	if classified.RegistrableDomain != "" {
+		identityItems = append(identityItems, "Registrable domain: "+classified.RegistrableDomain)
+	}
+	trace.Sections = appendTraceSection(trace.Sections, "Result", identityItems)
+
+	trace.Sections = appendTraceSection(trace.Sections, "Contributor Provenance", buildContributorTraceItems(contributors))
+
+	if len(contributors) == 1 {
+		contributor := contributors[0]
+		enum := enumByID[contributor.EnumerationID]
+		seed := seedByID[contributor.SeedID]
+
+		seedItems := make([]string, 0, 5)
+		if seed.ID != "" {
+			seedItems = append(seedItems, "Seed ID: "+seed.ID)
+		}
+		if seed.CompanyName != "" {
+			seedItems = append(seedItems, "Company: "+seed.CompanyName)
+		}
+		if len(seed.Domains) > 0 {
+			seedItems = append(seedItems, "Seed domains: "+strings.Join(seed.Domains, ", "))
+		}
+		if len(seed.Tags) > 0 {
+			seedItems = append(seedItems, "Seed tags: "+strings.Join(seed.Tags, ", "))
+		}
+		if evidence := formatSeedEvidence(seed.Evidence); len(evidence) > 0 {
+			seedItems = append(seedItems, evidence...)
+		}
+		trace.Sections = appendTraceSection(trace.Sections, "Seed Context", seedItems)
+
+		enumItems := make([]string, 0, 5)
+		if enum.ID != "" {
+			enumItems = append(enumItems, "Enumeration ID: "+enum.ID)
+		}
+		if enum.Status != "" {
+			enumItems = append(enumItems, "Status: "+enum.Status)
+		}
+		if !enum.CreatedAt.IsZero() {
+			enumItems = append(enumItems, "Created at: "+exportutil.FormatDateTime(enum.CreatedAt))
+		}
+		if !enum.StartedAt.IsZero() {
+			enumItems = append(enumItems, "Started at: "+exportutil.FormatDateTime(enum.StartedAt))
+		}
+		if !enum.EndedAt.IsZero() {
+			enumItems = append(enumItems, "Ended at: "+exportutil.FormatDateTime(enum.EndedAt))
+		}
+		trace.Sections = appendTraceSection(trace.Sections, "Enumeration", enumItems)
+	}
+
+	trace.Sections = appendTraceSection(trace.Sections, "Domain Evidence", buildDomainTraceItems(asset))
+	trace.Sections = appendTraceSection(trace.Sections, "Network Evidence", buildIPTraceItems(asset))
+	trace.Sections = appendTraceSection(trace.Sections, "Enrichment", buildEnrichmentTraceItems(asset.EnrichmentData))
+
+	return trace
+}
+
+func buildVisualizerTraceContributors(asset models.Asset, enumByID map[string]models.Enumeration, seedByID map[string]models.Seed) []models.VisualizerTraceContributor {
+	provenance := append([]models.AssetProvenance(nil), asset.Provenance...)
+	if len(provenance) == 0 {
+		provenance = append(provenance, models.AssetProvenance{
+			AssetID:       asset.ID,
+			EnumerationID: asset.EnumerationID,
+			Source:        asset.Source,
+			DiscoveryDate: asset.DiscoveryDate,
+		})
+	}
+
+	contributors := make([]models.VisualizerTraceContributor, 0, len(provenance))
+	for _, item := range provenance {
+		enum := enumByID[item.EnumerationID]
+		seed := seedByID[enum.SeedID]
+
+		seedLabel := seed.CompanyName
+		if seedLabel == "" {
+			seedLabel = enum.SeedID
+		}
+
+		discoveryDate := item.DiscoveryDate
+		if discoveryDate.IsZero() {
+			discoveryDate = asset.DiscoveryDate
+		}
+
+		contributors = append(contributors, models.VisualizerTraceContributor{
+			AssetID:       item.AssetID,
+			EnumerationID: item.EnumerationID,
+			SeedID:        enum.SeedID,
+			SeedLabel:     seedLabel,
+			Source:        item.Source,
+			DiscoveryDate: discoveryDate,
+		})
+	}
+
+	return contributors
+}
+
+func buildContributorTraceItems(contributors []models.VisualizerTraceContributor) []string {
+	items := make([]string, 0, len(contributors))
+	for _, contributor := range contributors {
+		parts := make([]string, 0, 6)
+		if contributor.AssetID != "" {
+			parts = append(parts, "asset "+contributor.AssetID)
+		}
+		if contributor.Source != "" {
+			parts = append(parts, "source "+contributor.Source)
+		}
+		if contributor.EnumerationID != "" {
+			parts = append(parts, "enumeration "+contributor.EnumerationID)
+		}
+		if contributor.SeedID != "" {
+			seed := contributor.SeedID
+			if contributor.SeedLabel != "" && contributor.SeedLabel != contributor.SeedID {
+				seed += " (" + contributor.SeedLabel + ")"
+			}
+			parts = append(parts, "seed "+seed)
+		}
+		if !contributor.DiscoveryDate.IsZero() {
+			parts = append(parts, "discovered "+exportutil.FormatDateTime(contributor.DiscoveryDate))
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		items = append(items, strings.Join(parts, " | "))
+	}
+	return items
+}
+
+func summarizeTraceContributorValues(contributors []models.VisualizerTraceContributor, value func(models.VisualizerTraceContributor) string) string {
+	values := uniqueTraceContributorValues(contributors, value)
+	return strings.Join(values, ", ")
+}
+
+func uniqueTraceContributorValues(contributors []models.VisualizerTraceContributor, value func(models.VisualizerTraceContributor) string) []string {
+	out := make([]string, 0, len(contributors))
+	seen := make(map[string]struct{}, len(contributors))
+	for _, contributor := range contributors {
+		item := strings.TrimSpace(value(contributor))
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func summarizeTraceStatus(asset models.Asset, contributors []models.VisualizerTraceContributor, enumByID map[string]models.Enumeration) string {
+	statuses := make([]string, 0, len(contributors))
+	seen := make(map[string]struct{}, len(contributors))
+	for _, contributor := range contributors {
+		status := strings.TrimSpace(enumByID[contributor.EnumerationID].Status)
+		if status == "" {
+			continue
+		}
+		if _, exists := seen[status]; exists {
+			continue
+		}
+		seen[status] = struct{}{}
+		statuses = append(statuses, status)
+	}
+	if len(statuses) == 0 {
+		return enumByID[asset.EnumerationID].Status
+	}
+	return strings.Join(statuses, ", ")
+}
+
+func buildVisualizerTraceLinks(runID string, row models.VisualizerRow, rows []models.VisualizerRow) []models.VisualizerTraceLink {
+	links := make([]models.VisualizerTraceLink, 0, 8)
+	seen := map[string]struct{}{row.AssetID: {}}
+
+	appendMatch := func(candidate models.VisualizerRow, label, description string) {
+		if _, exists := seen[candidate.AssetID]; exists {
+			return
+		}
+		seen[candidate.AssetID] = struct{}{}
+		links = append(links, models.VisualizerTraceLink{
+			AssetID:     candidate.AssetID,
+			Identifier:  candidate.Identifier,
+			Label:       label,
+			Description: description,
+			TracePath:   buildVisualizerTracePath(runID, candidate.AssetID),
+		})
+	}
+
+	for _, candidate := range rows {
+		if len(links) >= 8 {
+			break
+		}
+		if candidate.AssetID == row.AssetID {
+			continue
+		}
+		if row.RegistrableDomain != "" && candidate.RegistrableDomain == row.RegistrableDomain {
+			appendMatch(candidate, "Same Registrable Domain", "Shares "+candidate.RegistrableDomain)
+		}
+	}
+
+	for _, candidate := range rows {
+		if len(links) >= 8 {
+			break
+		}
+		if candidate.AssetID == row.AssetID {
+			continue
+		}
+		if visualizerHasSharedValue(row.EnumerationID, candidate.EnumerationID) {
+			appendMatch(candidate, "Same Enumeration", "Collected in "+candidate.EnumerationID)
+		}
+	}
+
+	return links
+}
+
+func visualizerHasSharedValue(left, right string) bool {
+	leftValues := splitVisualizerValues(left)
+	rightValues := splitVisualizerValues(right)
+	if len(leftValues) == 0 || len(rightValues) == 0 {
+		return false
+	}
+
+	seen := make(map[string]struct{}, len(leftValues))
+	for _, item := range leftValues {
+		seen[item] = struct{}{}
+	}
+	for _, item := range rightValues {
+		if _, exists := seen[item]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func splitVisualizerValues(value string) []string {
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, exists := seen[part]; exists {
+			continue
+		}
+		seen[part] = struct{}{}
+		values = append(values, part)
+	}
+	return values
+}
+
+func appendTraceSection(sections []models.VisualizerTraceSection, title string, items []string) []models.VisualizerTraceSection {
+	if len(items) == 0 {
+		return sections
+	}
+
+	clean := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		clean = append(clean, item)
+	}
+	if len(clean) == 0 {
+		return sections
+	}
+
+	return append(sections, models.VisualizerTraceSection{
+		Title: title,
+		Items: clean,
+	})
+}
+
+func formatSeedEvidence(evidence []models.SeedEvidence) []string {
+	items := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		parts := make([]string, 0, 4)
+		if item.Source != "" {
+			parts = append(parts, item.Source)
+		}
+		if item.Kind != "" {
+			parts = append(parts, item.Kind)
+		}
+		if item.Value != "" {
+			parts = append(parts, item.Value)
+		}
+		if item.Confidence > 0 {
+			parts = append(parts, fmt.Sprintf("confidence %.2f", item.Confidence))
+		}
+		if item.Reasoned {
+			parts = append(parts, "reasoned")
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		items = append(items, "Evidence: "+strings.Join(parts, " | "))
+	}
+	return items
+}
+
+func buildDomainTraceItems(asset models.Asset) []string {
+	if asset.DomainDetails == nil {
+		return nil
+	}
+
+	items := make([]string, 0, 8)
+	if len(asset.DomainDetails.Records) > 0 {
+		recordParts := make([]string, 0, len(asset.DomainDetails.Records))
+		for _, record := range asset.DomainDetails.Records {
+			recordParts = append(recordParts, record.Type+" "+record.Value)
+		}
+		items = append(items, "DNS records: "+strings.Join(recordParts, ", "))
+	}
+	if asset.DomainDetails.IsCatchAll {
+		items = append(items, "Catch-all detection: true")
+	}
+	if asset.DomainDetails.RDAP != nil {
+		rdap := asset.DomainDetails.RDAP
+		if rdap.RegistrarName != "" {
+			items = append(items, "Registrar: "+rdap.RegistrarName)
+		}
+		if rdap.RegistrantOrg != "" {
+			items = append(items, "Registrant org: "+rdap.RegistrantOrg)
+		}
+		if len(rdap.NameServers) > 0 {
+			items = append(items, "Nameservers: "+strings.Join(rdap.NameServers, ", "))
+		}
+		if !rdap.CreationDate.IsZero() {
+			items = append(items, "Registration created: "+rdap.CreationDate.Format("2006-01-02"))
+		}
+		if !rdap.ExpirationDate.IsZero() {
+			items = append(items, "Registration expires: "+rdap.ExpirationDate.Format("2006-01-02"))
+		}
+	}
+
+	return items
+}
+
+func buildIPTraceItems(asset models.Asset) []string {
+	if asset.IPDetails == nil {
+		return nil
+	}
+
+	items := make([]string, 0, 4)
+	if asset.IPDetails.ASN != 0 {
+		items = append(items, fmt.Sprintf("ASN: %d", asset.IPDetails.ASN))
+	}
+	if asset.IPDetails.Organization != "" {
+		items = append(items, "Organization: "+asset.IPDetails.Organization)
+	}
+	if asset.IPDetails.PTR != "" {
+		items = append(items, "PTR: "+asset.IPDetails.PTR)
+	}
+	return items
+}
+
+func buildEnrichmentTraceItems(enrichment map[string]interface{}) []string {
+	if len(enrichment) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(enrichment))
+	for key := range enrichment {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	items := make([]string, 0, len(keys))
+	for _, key := range keys {
+		items = append(items, fmt.Sprintf("%s: %s", key, formatEnrichmentValue(enrichment[key])))
+	}
+	return items
+}
+
+func formatEnrichmentValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		if typed == "" {
+			return "-"
+		}
+		return typed
+	case []string:
+		return strings.Join(typed, ", ")
+	default:
+		data, err := json.Marshal(typed)
+		if err != nil {
+			return fmt.Sprint(typed)
+		}
+		return string(data)
+	}
+}
+
+func formatTraceLabel(value string) string {
+	return strings.ReplaceAll(value, "_", " ")
 }
 
 func readVisualizerManifest(path string) (models.VisualizerManifest, error) {
@@ -430,6 +877,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       gap: 1rem;
       padding: 1rem;
       margin-bottom: 1.25rem;
+      position: relative;
+      z-index: 10;
     }
 
     .field {
@@ -447,7 +896,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     }
 
     .field input,
-    .field select {
+    .field select,
+    .multi-select-trigger {
       width: 100%;
       border: 1px solid rgba(126, 59, 0, 0.14);
       border-radius: 14px;
@@ -458,9 +908,84 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     }
 
     .field input:focus,
-    .field select:focus {
+    .field select:focus,
+    .multi-select-trigger:focus,
+    .multi-select.is-open .multi-select-trigger {
       outline: 2px solid rgba(190, 106, 21, 0.22);
       border-color: rgba(190, 106, 21, 0.35);
+    }
+
+    .multi-select {
+      position: relative;
+    }
+
+    .multi-select.is-open {
+      z-index: 30;
+    }
+
+    .multi-select-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .multi-select-trigger::after {
+      content: "▾";
+      flex: none;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .multi-select-menu {
+      position: absolute;
+      top: calc(100% + 0.45rem);
+      left: 0;
+      right: 0;
+      z-index: 40;
+      max-height: min(20rem, calc(100vh - 14rem));
+      overflow: auto;
+      padding: 0.45rem;
+      border: 1px solid rgba(126, 59, 0, 0.18);
+      border-radius: 16px;
+      background: rgba(255, 252, 245, 0.98);
+      box-shadow: 0 18px 36px rgba(68, 44, 18, 0.14);
+    }
+
+    .multi-select-options {
+      display: grid;
+      gap: 0.2rem;
+      max-height: 15rem;
+      overflow: auto;
+      padding-top: 0.2rem;
+      border-top: 1px solid rgba(80, 61, 44, 0.08);
+    }
+
+    .multi-select-option {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      padding: 0.55rem 0.6rem;
+      border-radius: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .multi-select-option:hover {
+      background: rgba(190, 106, 21, 0.08);
+    }
+
+    .multi-select-option input {
+      width: 1rem;
+      height: 1rem;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .multi-select-option-all {
+      font-weight: 700;
     }
 
     .summary {
@@ -469,6 +994,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       gap: 0.85rem;
       padding: 1rem;
       margin-bottom: 1.25rem;
+      position: relative;
+      z-index: 1;
     }
 
     .metric {
@@ -497,15 +1024,22 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
 
     .table-shell {
       padding: 1rem;
+      position: relative;
+      z-index: 1;
     }
 
     .table-meta {
+      display: grid;
+      gap: 0.75rem;
+      margin-bottom: 0.85rem;
+    }
+
+    .table-toolbar {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
-      margin-bottom: 0.85rem;
     }
 
     #download-links {
@@ -522,6 +1056,32 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       background: var(--accent-soft);
       font-size: 0.9rem;
       font-weight: 700;
+    }
+
+    .view-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.25rem;
+      border-radius: 999px;
+      background: rgba(126, 59, 0, 0.08);
+    }
+
+    .view-toggle button {
+      border: 0;
+      border-radius: 999px;
+      padding: 0.5rem 0.9rem;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .view-toggle button.is-active {
+      background: var(--panel-strong);
+      color: var(--accent-strong);
+      box-shadow: inset 0 0 0 1px rgba(126, 59, 0, 0.12);
     }
 
     .table-wrap {
@@ -582,6 +1142,176 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       text-transform: capitalize;
     }
 
+    .source-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+
+    .source-pill {
+      background: rgba(190, 106, 21, 0.12);
+      color: var(--accent-strong);
+      text-transform: none;
+      cursor: help;
+    }
+
+    [data-tooltip] {
+      position: relative;
+    }
+
+    .app-tooltip {
+      position: fixed;
+      left: 0;
+      top: 0;
+      z-index: 9999;
+      max-width: min(26rem, calc(100vw - 1.5rem));
+      padding: 0.65rem 0.8rem;
+      border-radius: 14px;
+      border: 1px solid rgba(126, 59, 0, 0.14);
+      background: rgba(27, 23, 19, 0.96);
+      color: #fff8ef;
+      box-shadow: 0 18px 40px rgba(27, 23, 19, 0.28);
+      font-size: 0.82rem;
+      line-height: 1.45;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate3d(0, -0.2rem, 0);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+
+    .app-tooltip[data-visible="true"] {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+
+    .result-trace-link,
+    .trace-related-link,
+    .trace-back-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+      border-radius: 999px;
+      padding: 0.45rem 0.8rem;
+      text-decoration: none;
+      font-size: 0.86rem;
+      font-weight: 700;
+    }
+
+    .result-trace-link,
+    .trace-related-link {
+      color: var(--accent-strong);
+      background: var(--accent-soft);
+    }
+
+    .trace-back-button {
+      border: 0;
+      background: rgba(117, 156, 130, 0.14);
+      color: #365644;
+      cursor: pointer;
+    }
+
+    .trace-view {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .trace-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1rem;
+      border-radius: 18px;
+      border: 1px solid rgba(126, 59, 0, 0.08);
+      background: linear-gradient(180deg, rgba(255, 248, 235, 0.92), rgba(255, 255, 255, 0.78));
+    }
+
+    .trace-header h2 {
+      margin: 0.35rem 0 0.25rem;
+      font-family: var(--font-heading);
+      font-size: clamp(1.4rem, 2vw, 2rem);
+      line-height: 1.1;
+    }
+
+    .trace-header p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .trace-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+    }
+
+    .trace-summary .pill {
+      background: rgba(126, 59, 0, 0.08);
+      color: var(--accent-strong);
+      text-transform: none;
+    }
+
+    .trace-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 0.85rem;
+    }
+
+    .trace-card {
+      padding: 1rem;
+      border-radius: 18px;
+      border: 1px solid rgba(126, 59, 0, 0.08);
+      background: rgba(255, 255, 255, 0.82);
+    }
+
+    .trace-card h3,
+    .trace-related-shell h3 {
+      margin: 0 0 0.75rem;
+      font-family: var(--font-heading);
+      font-size: 1rem;
+    }
+
+    .trace-items {
+      margin: 0;
+      padding-left: 1rem;
+      color: var(--ink);
+    }
+
+    .trace-items li + li {
+      margin-top: 0.45rem;
+    }
+
+    .trace-related-shell {
+      padding: 1rem;
+      border-radius: 18px;
+      border: 1px solid rgba(126, 59, 0, 0.08);
+      background: rgba(255, 255, 255, 0.82);
+    }
+
+    .trace-related-list {
+      display: grid;
+      gap: 0.65rem;
+    }
+
+    .trace-related-item {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.8rem 0.9rem;
+      border-radius: 14px;
+      background: rgba(249, 244, 235, 0.72);
+      border: 1px solid rgba(80, 61, 44, 0.08);
+    }
+
+    .trace-related-copy strong {
+      display: block;
+      margin-bottom: 0.2rem;
+    }
+
     .muted {
       color: var(--muted);
     }
@@ -609,6 +1339,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
   </style>
 </head>
 <body>
+  <div class="app-tooltip" id="app-tooltip" role="tooltip" aria-hidden="true"></div>
   <main>
     <section class="hero">
       <div class="eyebrow">Enumeration Results</div>
@@ -639,10 +1370,19 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         </select>
       </div>
       <div class="field">
-        <label for="source-filter">Source</label>
-        <select id="source-filter">
-          <option value="">All sources</option>
-        </select>
+        <label for="source-filter-trigger">Source</label>
+        <div class="multi-select" id="source-filter">
+          <button type="button" class="multi-select-trigger" id="source-filter-trigger" aria-haspopup="true" aria-expanded="false">
+            All sources
+          </button>
+          <div class="multi-select-menu" id="source-filter-menu" hidden>
+            <label class="multi-select-option multi-select-option-all" data-tooltip="Show assets from every source.">
+              <input type="checkbox" data-role="all" checked>
+              <span>All sources</span>
+            </label>
+            <div class="multi-select-options" id="source-filter-options"></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -675,10 +1415,16 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
 
     <section class="table-shell">
       <div class="table-meta">
-        <div class="muted" id="table-caption">No archived runs loaded.</div>
+        <div class="table-toolbar">
+          <div class="muted" id="table-caption">No archived runs loaded.</div>
+          <div class="view-toggle" role="tablist" aria-label="Visualizer views">
+            <button type="button" id="results-view-button" class="is-active">Results</button>
+            <button type="button" id="trace-view-button">Trace</button>
+          </div>
+        </div>
         <div id="download-links"></div>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap" id="results-view">
         <table>
           <thead>
             <tr>
@@ -692,23 +1438,43 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
               <th><button type="button" data-key="status">Status</button></th>
               <th><button type="button" data-key="discovery_date">Discovered</button></th>
               <th><button type="button" data-key="details">Details</button></th>
+              <th>Trace</th>
             </tr>
           </thead>
           <tbody id="results-body"></tbody>
         </table>
       </div>
       <p id="empty-state">No rows match the active filters.</p>
+      <section class="trace-view" id="trace-view" hidden>
+        <div class="trace-header">
+          <div>
+            <div class="eyebrow">Result Trace</div>
+            <h2 id="trace-title">Select a result</h2>
+            <p id="trace-subtitle">Choose any result row to inspect its exported provenance, context, and related results.</p>
+          </div>
+          <button type="button" class="trace-back-button" id="trace-back-button">Back To Results</button>
+        </div>
+        <div class="trace-summary" id="trace-summary"></div>
+        <div class="trace-grid" id="trace-sections"></div>
+        <div class="trace-related-shell">
+          <h3>Related Results</h3>
+          <div id="trace-related"></div>
+        </div>
+      </section>
     </section>
   </main>
 
   <script>
     const runs = {{.RunsJSON}};
+    const initialHash = parseHash();
     const state = {
-      runId: runs[0] ? runs[0].id : "",
+      runId: initialHash.runId || (runs[0] ? runs[0].id : ""),
       search: "",
       type: "",
       domainKind: "",
-      source: "",
+      sources: [],
+      view: initialHash.view,
+      traceAssetId: initialHash.assetId,
       sortKey: "discovery_date",
       sortDirection: "desc"
     };
@@ -718,20 +1484,82 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     const typeFilter = document.getElementById("type-filter");
     const domainKindFilter = document.getElementById("domain-kind-filter");
     const sourceFilter = document.getElementById("source-filter");
+    const sourceFilterTrigger = document.getElementById("source-filter-trigger");
+    const sourceFilterMenu = document.getElementById("source-filter-menu");
+    const sourceFilterOptions = document.getElementById("source-filter-options");
     const body = document.getElementById("results-body");
+    const resultsView = document.getElementById("results-view");
+    const traceView = document.getElementById("trace-view");
+    const resultsViewButton = document.getElementById("results-view-button");
+    const traceViewButton = document.getElementById("trace-view-button");
+    const traceBackButton = document.getElementById("trace-back-button");
+    const traceTitle = document.getElementById("trace-title");
+    const traceSubtitle = document.getElementById("trace-subtitle");
+    const traceSummary = document.getElementById("trace-summary");
+    const traceSections = document.getElementById("trace-sections");
+    const traceRelated = document.getElementById("trace-related");
     const emptyState = document.getElementById("empty-state");
     const downloadLinks = document.getElementById("download-links");
     const tableCaption = document.getElementById("table-caption");
+    const appTooltip = document.getElementById("app-tooltip");
 
     document.getElementById("run-count").textContent = String(runs.length);
 
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    const sourceDescriptions = Object.freeze({
+      "crt.sh": "Certificate Transparency results from crt.sh, used to surface domains seen in public TLS certificates.",
+      "dns_collector": "Direct DNS lookups for the target domain, including A, AAAA, MX, TXT, and NS records.",
+      "hackertarget_collector": "Passive subdomain and host search results returned by HackerTarget.",
+      "rdap_collector": "Registration data from RDAP, including registrar, registrant, and nameserver metadata.",
+      "wayback_collector": "Historical hostnames recovered from the Internet Archive Wayback Machine CDX index.",
+      "alienvault_collector": "Passive DNS observations from AlienVault OTX.",
+      "web_hint_collector": "Ownership hints mined from the target website and security.txt references.",
+      "reverse_registration_collector": "Candidate sibling domains discovered through certificate transparency and RDAP overlap.",
+      "asn_cidr_collector": "PTR-derived domains and roots discovered by pivoting through known ASN and CIDR network ranges."
+    });
+
+    function parseHash() {
+      const value = String(window.location.hash || "").replace(/^#/, "");
+      if (!value.startsWith("trace/")) {
+        return { view: "results", runId: "", assetId: "" };
+      }
+
+      const parts = value.split("/");
+      if (parts.length < 3) {
+        return { view: "results", runId: "", assetId: "" };
+      }
+
+      return {
+        view: "trace",
+        runId: decodeURIComponent(parts[1] || ""),
+        assetId: decodeURIComponent(parts.slice(2).join("/"))
+      };
+    }
+
+    function syncHash() {
+      const url = new URL(window.location.href);
+      if (state.view === "trace" && state.runId && state.traceAssetId) {
+        url.hash = "trace/" + encodeURIComponent(state.runId) + "/" + encodeURIComponent(state.traceAssetId);
+      } else {
+        url.hash = "";
+      }
+      window.history.replaceState(null, "", url);
+    }
 
     function currentRun() {
       return runs.find((run) => run.id === state.runId) || runs[0] || null;
     }
 
+    function currentTrace(run) {
+      if (!run || !Array.isArray(run.traces)) {
+        return null;
+      }
+      return run.traces.find((trace) => trace.asset_id === state.traceAssetId) || null;
+    }
+
     function fillRunSelect() {
+      const selectedRun = currentRun();
+      state.runId = selectedRun ? selectedRun.id : "";
       runSelect.innerHTML = "";
       runs.forEach((run) => {
         const option = document.createElement("option");
@@ -745,6 +1573,28 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
 
     function uniqueValues(rows, key) {
       return [...new Set(rows.map((row) => row[key]).filter(Boolean))].sort((a, b) => collator.compare(a, b));
+    }
+
+    function splitSources(value) {
+      const seen = new Set();
+      return String(value || "")
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => {
+          if (!part || seen.has(part)) {
+            return false;
+          }
+          seen.add(part);
+          return true;
+        });
+    }
+
+    function uniqueSourceValues(rows) {
+      const values = new Set();
+      rows.forEach((row) => {
+        splitSources(row.source).forEach((source) => values.add(source));
+      });
+      return [...values].sort((a, b) => collator.compare(a, b));
     }
 
     function refillFilter(select, values, placeholder, activeValue) {
@@ -768,14 +1618,280 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       }
     }
 
+    function sourceFilterLabel() {
+      if (state.sources.length === 0) {
+        return "All sources";
+      }
+      if (state.sources.length === 1) {
+        return state.sources[0];
+      }
+      return String(state.sources.length) + " sources selected";
+    }
+
+    function syncSourceFilterUI() {
+      const selected = new Set(state.sources);
+      sourceFilterOptions.querySelectorAll("input[type=\"checkbox\"]").forEach((input) => {
+        input.checked = selected.has(input.value);
+      });
+
+      const allToggle = sourceFilterMenu.querySelector("input[data-role=\"all\"]");
+      if (allToggle) {
+        allToggle.checked = state.sources.length === 0;
+      }
+
+      sourceFilterTrigger.textContent = sourceFilterLabel();
+      sourceFilterTrigger.setAttribute("aria-expanded", sourceFilterMenu.hidden ? "false" : "true");
+    }
+
+    function hideTooltip() {
+      appTooltip.dataset.visible = "false";
+      appTooltip.setAttribute("aria-hidden", "true");
+      appTooltip.textContent = "";
+    }
+
+    function showTooltip(target, text) {
+      if (!target || !text) {
+        hideTooltip();
+        return;
+      }
+
+      appTooltip.textContent = text;
+      appTooltip.dataset.visible = "true";
+      appTooltip.setAttribute("aria-hidden", "false");
+
+      const rect = target.getBoundingClientRect();
+      const tooltipRect = appTooltip.getBoundingClientRect();
+      const gap = 12;
+      const maxLeft = Math.max(gap, window.innerWidth - tooltipRect.width - gap);
+      const desiredLeft = rect.left + (rect.width / 2) - (tooltipRect.width / 2);
+      const left = Math.min(maxLeft, Math.max(gap, desiredLeft));
+
+      let top = rect.bottom + gap;
+      if (top + tooltipRect.height > window.innerHeight - gap) {
+        top = rect.top - tooltipRect.height - gap;
+      }
+      if (top < gap) {
+        top = gap;
+      }
+
+      appTooltip.style.left = Math.round(left) + "px";
+      appTooltip.style.top = Math.round(top) + "px";
+    }
+
+    function tooltipTarget(event) {
+      const target = event.target.closest("[data-tooltip]");
+      if (!target || !document.body.contains(target)) {
+        return null;
+      }
+      return target;
+    }
+
+    function refillSourceFilter(rows) {
+      const values = uniqueSourceValues(rows);
+      const active = new Set(state.sources.filter((source) => values.includes(source)));
+      state.sources = values.filter((source) => active.has(source));
+
+      sourceFilterOptions.innerHTML = "";
+      values.forEach((value) => {
+        const label = document.createElement("label");
+        label.className = "multi-select-option";
+        label.dataset.tooltip = describeSource(value);
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = value;
+
+        const text = document.createElement("span");
+        text.textContent = value;
+
+        label.appendChild(input);
+        label.appendChild(text);
+        sourceFilterOptions.appendChild(label);
+      });
+
+      syncSourceFilterUI();
+    }
+
     function normalize(value) {
       return String(value || "").toLowerCase();
+    }
+
+    function describeSource(value) {
+      return sourceDescriptions[value] || ("Collected from " + String(value || "an unknown source") + ".");
     }
 
     function formatDomainKind(value) {
       return String(value || "")
         .replaceAll("_", " ")
         .replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function renderSourceCell(value) {
+      const sources = splitSources(value);
+      if (sources.length === 0) {
+        return "<span class=\"muted\">-</span>";
+      }
+      return "<div class=\"source-list\">" + sources.map((source) => {
+        return "<span class=\"pill source-pill\" data-tooltip=\"" + escapeHTML(describeSource(source)) + "\">" + escapeHTML(source) + "</span>";
+      }).join("") + "</div>";
+    }
+
+    function renderTraceSummary(trace) {
+      const pills = [];
+      const contributors = Array.isArray(trace.contributors) ? trace.contributors : [];
+      const uniqueContributorValues = (key) => {
+        const seen = new Set();
+        return contributors
+          .map((item) => String(item && item[key] || "").trim())
+          .filter((value) => {
+            if (!value || seen.has(value)) {
+              return false;
+            }
+            seen.add(value);
+            return true;
+          });
+      };
+      if (trace.asset_type) {
+        pills.push("<span class=\"pill\">" + escapeHTML(trace.asset_type) + "</span>");
+      }
+      if (trace.domain_kind) {
+        pills.push("<span class=\"pill\">" + escapeHTML(formatDomainKind(trace.domain_kind)) + "</span>");
+      }
+      if (trace.registrable_domain) {
+        pills.push("<span class=\"pill\">" + escapeHTML(trace.registrable_domain) + "</span>");
+      }
+      if (trace.source) {
+        splitSources(trace.source).forEach((source) => {
+          pills.push("<span class=\"pill\">" + escapeHTML(source) + "</span>");
+        });
+      }
+      if (contributors.length > 0) {
+        pills.push("<span class=\"pill\">" + escapeHTML(String(contributors.length)) + " contributor" + (contributors.length === 1 ? "" : "s") + "</span>");
+
+        const enumerations = uniqueContributorValues("enumeration_id");
+        if (enumerations.length === 1) {
+          pills.push("<span class=\"pill\">Enum " + escapeHTML(enumerations[0]) + "</span>");
+        } else if (enumerations.length > 1) {
+          pills.push("<span class=\"pill\">" + escapeHTML(String(enumerations.length)) + " enumerations</span>");
+        }
+
+        const seeds = uniqueContributorValues("seed_id");
+        if (seeds.length === 1) {
+          pills.push("<span class=\"pill\">Seed " + escapeHTML(seeds[0]) + "</span>");
+        } else if (seeds.length > 1) {
+          pills.push("<span class=\"pill\">" + escapeHTML(String(seeds.length)) + " seeds</span>");
+        }
+      } else {
+        if (trace.enumeration_id) {
+          pills.push("<span class=\"pill\">Enum " + escapeHTML(trace.enumeration_id) + "</span>");
+        }
+        if (trace.seed_id) {
+          pills.push("<span class=\"pill\">Seed " + escapeHTML(trace.seed_id) + "</span>");
+        }
+      }
+      return pills.join("");
+    }
+
+    function renderTraceSections(trace) {
+      const sections = Array.isArray(trace.sections) ? trace.sections : [];
+      if (sections.length === 0) {
+        return "<article class=\"trace-card\"><h3>No Trace Sections</h3><p class=\"muted\">This result does not include exported trace details.</p></article>";
+      }
+
+      return sections.map((section) => {
+        const items = Array.isArray(section.items) ? section.items : [];
+        return [
+          "<article class=\"trace-card\">",
+          "<h3>", escapeHTML(section.title || "Trace"), "</h3>",
+          "<ul class=\"trace-items\">",
+          items.map((item) => "<li>" + escapeHTML(item) + "</li>").join(""),
+          "</ul>",
+          "</article>"
+        ].join("");
+      }).join("");
+    }
+
+    function renderTraceRelated(trace) {
+      const related = Array.isArray(trace.related) ? trace.related : [];
+      if (related.length === 0) {
+        return "<p class=\"muted\">No related results were linked for this exported trace.</p>";
+      }
+
+      return "<div class=\"trace-related-list\">" + related.map((link) => {
+        return [
+          "<div class=\"trace-related-item\">",
+          "<div class=\"trace-related-copy\">",
+          "<strong>", escapeHTML(link.identifier || link.asset_id), "</strong>",
+          "<span class=\"muted\">", escapeHTML(link.label || "Related Result"), "</span>",
+          link.description ? "<div class=\"muted\">" + escapeHTML(link.description) + "</div>" : "",
+          "</div>",
+          "<a href=\"", escapeHTML(link.trace_path || "#"), "\" class=\"trace-related-link\" data-trace-link data-run-id=\"", escapeHTML(state.runId), "\" data-asset-id=\"", escapeHTML(link.asset_id), "\">Open Trace</a>",
+          "</div>"
+        ].join("");
+      }).join("") + "</div>";
+    }
+
+    function ensureTraceSelection(run, rows) {
+      if (state.view !== "trace") {
+        return;
+      }
+
+      const trace = currentTrace(run);
+      if (trace) {
+        return;
+      }
+
+      const firstTrace = run && Array.isArray(run.traces) ? run.traces[0] : null;
+      const firstRow = rows[0] || null;
+      if (firstTrace) {
+        state.traceAssetId = firstTrace.asset_id;
+        return;
+      }
+      if (firstRow) {
+        state.traceAssetId = firstRow.asset_id;
+        return;
+      }
+
+      state.view = "results";
+      state.traceAssetId = "";
+    }
+
+    function openTrace(runId, assetId) {
+      if (!runId || !assetId) {
+        return;
+      }
+
+      state.runId = runId;
+      state.view = "trace";
+      state.traceAssetId = assetId;
+      fillRunSelect();
+      updateFiltersForRun();
+      renderTable();
+      syncHash();
+    }
+
+    function openTraceFromCurrentSelection() {
+      const run = currentRun();
+      const rows = visibleRows(run);
+      if (!run) {
+        return;
+      }
+
+      if (state.traceAssetId && currentTrace(run)) {
+        state.view = "trace";
+      } else if (rows[0]) {
+        state.view = "trace";
+        state.traceAssetId = rows[0].asset_id;
+      } else if (Array.isArray(run.traces) && run.traces[0]) {
+        state.view = "trace";
+        state.traceAssetId = run.traces[0].asset_id;
+      } else {
+        state.view = "results";
+        state.traceAssetId = "";
+      }
+
+      renderTable();
+      syncHash();
     }
 
     function compareRows(left, right) {
@@ -807,7 +1923,13 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       return run.rows
         .filter((row) => !state.type || row.asset_type === state.type)
         .filter((row) => !state.domainKind || row.domain_kind === state.domainKind)
-        .filter((row) => !state.source || row.source === state.source)
+        .filter((row) => {
+          if (state.sources.length === 0) {
+            return true;
+          }
+          const rowSources = splitSources(row.source);
+          return state.sources.every((source) => rowSources.includes(source));
+        })
         .filter((row) => {
           if (!state.search) {
             return true;
@@ -848,6 +1970,9 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     function renderTable() {
       const run = currentRun();
       const rows = visibleRows(run);
+      ensureTraceSelection(run, rows);
+      const trace = currentTrace(run);
+      hideTooltip();
       body.innerHTML = "";
 
       document.getElementById("selected-run").textContent = run ? run.label : "No runs";
@@ -858,6 +1983,26 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       tableCaption.textContent = run ? "Showing " + rows.length + " of " + run.rows.length + " rows from " + run.label + "." : "No archived runs loaded.";
 
       renderDownloads(run);
+
+      const showTrace = state.view === "trace" && trace;
+      resultsView.hidden = showTrace;
+      traceView.hidden = !showTrace;
+      resultsViewButton.classList.toggle("is-active", !showTrace);
+      traceViewButton.classList.toggle("is-active", showTrace);
+
+      if (showTrace) {
+        traceTitle.textContent = trace.identifier || trace.asset_id || "Result Trace";
+        traceSubtitle.textContent = "Trace for asset " + String(trace.asset_id || "unknown") + ". Follow related results to pivot across the exported dataset.";
+        traceSummary.innerHTML = renderTraceSummary(trace);
+        traceSections.innerHTML = renderTraceSections(trace);
+        traceRelated.innerHTML = renderTraceRelated(trace);
+      } else {
+        traceTitle.textContent = "Select a result";
+        traceSubtitle.textContent = "Choose any result row to inspect its exported provenance, context, and related results.";
+        traceSummary.innerHTML = "";
+        traceSections.innerHTML = "";
+        traceRelated.innerHTML = "<p class=\"muted\">No trace selected.</p>";
+      }
 
       rows.forEach((row) => {
         const tr = document.createElement("tr");
@@ -873,17 +2018,18 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           "<td>", domainKind, "</td>",
           "<td>", registrableDomain, "</td>",
           "<td><span class=\"pill\">", escapeHTML(row.asset_type || "unknown"), "</span></td>",
-          "<td>", escapeHTML(row.source), "</td>",
+          "<td>", renderSourceCell(row.source), "</td>",
           "<td>", escapeHTML(row.enumeration_id), "</td>",
           "<td>", escapeHTML(row.seed_id), "</td>",
           "<td>", escapeHTML(row.status), "</td>",
           "<td>", escapeHTML(discovered), "</td>",
-          "<td>", escapeHTML(row.details), "</td>"
+          "<td>", escapeHTML(row.details), "</td>",
+          "<td><a href=\"", escapeHTML(row.trace_path || "#"), "\" class=\"result-trace-link\" data-trace-link data-run-id=\"", escapeHTML(run ? run.id : ""), "\" data-asset-id=\"", escapeHTML(row.asset_id), "\">Open Trace</a></td>"
         ].join("");
         body.appendChild(tr);
       });
 
-      emptyState.style.display = rows.length === 0 ? "block" : "none";
+      emptyState.style.display = !showTrace && rows.length === 0 ? "block" : "none";
       updateSortIndicators();
     }
 
@@ -899,8 +2045,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         }
       });
       state.domainKind = domainKindFilter.value;
-      refillFilter(sourceFilter, uniqueValues(rows, "source"), "All sources", state.source);
-      state.source = sourceFilter.value;
+      refillSourceFilter(rows);
     }
 
     function updateSortIndicators() {
@@ -934,7 +2079,18 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     runSelect.addEventListener("change", (event) => {
       state.runId = event.target.value;
       updateFiltersForRun();
+      if (state.view === "trace") {
+        const run = currentRun();
+        const trace = currentTrace(run);
+        if (!trace) {
+          state.traceAssetId = run && Array.isArray(run.traces) && run.traces[0] ? run.traces[0].asset_id : "";
+          if (!state.traceAssetId) {
+            state.view = "results";
+          }
+        }
+      }
       renderTable();
+      syncHash();
     });
 
     searchInput.addEventListener("input", (event) => {
@@ -952,9 +2108,60 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       renderTable();
     });
 
-    sourceFilter.addEventListener("change", (event) => {
-      state.source = event.target.value;
+    resultsViewButton.addEventListener("click", () => {
+      state.view = "results";
       renderTable();
+      syncHash();
+    });
+
+    traceViewButton.addEventListener("click", () => {
+      openTraceFromCurrentSelection();
+    });
+
+    traceBackButton.addEventListener("click", () => {
+      state.view = "results";
+      renderTable();
+      syncHash();
+    });
+
+    sourceFilter.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+
+    sourceFilterTrigger.addEventListener("click", () => {
+      sourceFilterMenu.hidden = !sourceFilterMenu.hidden;
+      sourceFilter.classList.toggle("is-open", !sourceFilterMenu.hidden);
+      syncSourceFilterUI();
+    });
+
+    sourceFilterMenu.addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") {
+        return;
+      }
+
+      if (target.dataset.role === "all") {
+        state.sources = [];
+      } else {
+        state.sources = Array.from(sourceFilterOptions.querySelectorAll("input[type=\"checkbox\"]:checked")).map((input) => input.value);
+      }
+
+      syncSourceFilterUI();
+      renderTable();
+    });
+
+    document.addEventListener("click", () => {
+      sourceFilterMenu.hidden = true;
+      sourceFilter.classList.remove("is-open");
+      syncSourceFilterUI();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        sourceFilterMenu.hidden = true;
+        sourceFilter.classList.remove("is-open");
+        syncSourceFilterUI();
+      }
     });
 
     document.querySelectorAll("thead button").forEach((button) => {
@@ -968,6 +2175,69 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         }
         renderTable();
       });
+    });
+
+    document.addEventListener("click", (event) => {
+      const link = event.target.closest("[data-trace-link]");
+      if (!link) {
+        return;
+      }
+
+      event.preventDefault();
+      openTrace(link.dataset.runId || state.runId, link.dataset.assetId);
+    });
+
+    document.addEventListener("pointerover", (event) => {
+      const target = tooltipTarget(event);
+      if (!target) {
+        return;
+      }
+      showTooltip(target, target.dataset.tooltip);
+    });
+
+    document.addEventListener("pointermove", (event) => {
+      const target = tooltipTarget(event);
+      if (!target) {
+        return;
+      }
+      showTooltip(target, target.dataset.tooltip);
+    });
+
+    document.addEventListener("pointerout", (event) => {
+      if (!tooltipTarget(event)) {
+        return;
+      }
+      hideTooltip();
+    });
+
+    document.addEventListener("focusin", (event) => {
+      const target = tooltipTarget(event);
+      if (!target) {
+        return;
+      }
+      showTooltip(target, target.dataset.tooltip);
+    });
+
+    document.addEventListener("focusout", (event) => {
+      if (!tooltipTarget(event)) {
+        return;
+      }
+      hideTooltip();
+    });
+
+    window.addEventListener("scroll", hideTooltip, true);
+    window.addEventListener("resize", hideTooltip);
+
+    window.addEventListener("hashchange", () => {
+      const next = parseHash();
+      state.view = next.view;
+      if (next.runId) {
+        state.runId = next.runId;
+      }
+      state.traceAssetId = next.assetId;
+      fillRunSelect();
+      updateFiltersForRun();
+      renderTable();
     });
 
     fillRunSelect();
