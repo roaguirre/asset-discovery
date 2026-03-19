@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"asset-discovery/internal/fetchutil"
 	"asset-discovery/internal/models"
 )
 
@@ -33,7 +34,7 @@ type CrtShCollector struct {
 
 func NewCrtShCollector() *CrtShCollector {
 	return &CrtShCollector{
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -46,7 +47,7 @@ func (c *CrtShCollector) Process(ctx context.Context, pCtx *models.PipelineConte
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
-			ID:        fmt.Sprintf("enum-crtsh-%d", time.Now().UnixNano()),
+			ID:        newNodeID("enum-crtsh"),
 			SeedID:    seed.ID,
 			Status:    "running",
 			CreatedAt: time.Now(),
@@ -59,17 +60,14 @@ func (c *CrtShCollector) Process(ctx context.Context, pCtx *models.PipelineConte
 			// Query crt.sh for %baseDomain
 			url := fmt.Sprintf("https://crt.sh/?q=%%.%s&output=json", baseDomain)
 
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err != nil {
-				log.Printf("[crt.sh Collector] Failed to build request for %s: %v", baseDomain, err)
-				newErrors = append(newErrors, err)
-				continue
-			}
-
-			// crt.sh requires a User-Agent or it might block
-			req.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
-
-			resp, err := c.client.Do(req)
+			resp, err := fetchutil.DoRequest(ctx, c.client, func(ctx context.Context) (*http.Request, error) {
+				retryReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+				if err != nil {
+					return nil, err
+				}
+				retryReq.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
+				return retryReq, nil
+			})
 			if err != nil {
 				log.Printf("[crt.sh Collector] Request failed for %s: %v", baseDomain, err)
 				newErrors = append(newErrors, err)
@@ -116,7 +114,7 @@ func (c *CrtShCollector) Process(ctx context.Context, pCtx *models.PipelineConte
 						foundDomains[name] = true
 
 						newAssets = append(newAssets, models.Asset{
-							ID:            fmt.Sprintf("dom-crtsh-%d", time.Now().UnixNano()),
+							ID:            newNodeID("dom-crtsh"),
 							EnumerationID: enum.ID,
 							Type:          models.AssetTypeDomain,
 							Identifier:    name,

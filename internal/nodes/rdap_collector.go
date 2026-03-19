@@ -2,7 +2,6 @@ package nodes
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -32,7 +31,7 @@ func (c *RDAPCollector) Process(ctx context.Context, pCtx *models.PipelineContex
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
-			ID:        fmt.Sprintf("enum-rdap-%d", time.Now().UnixNano()),
+			ID:        newNodeID("enum-rdap"),
 			SeedID:    seed.ID,
 			Status:    "running",
 			CreatedAt: time.Now(),
@@ -58,7 +57,7 @@ func (c *RDAPCollector) Process(ctx context.Context, pCtx *models.PipelineContex
 
 			// Add the RDAP domain enrichment asset
 			newAssets = append(newAssets, models.Asset{
-				ID:            fmt.Sprintf("dom-rdap-%d", time.Now().UnixNano()),
+				ID:            newNodeID("dom-rdap"),
 				EnumerationID: enum.ID,
 				Type:          models.AssetTypeDomain,
 				Identifier:    baseDomain,

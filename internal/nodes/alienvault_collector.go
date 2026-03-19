@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"asset-discovery/internal/fetchutil"
 	"asset-discovery/internal/models"
 )
 
@@ -39,7 +40,7 @@ func (c *AlienVaultCollector) Process(ctx context.Context, pCtx *models.Pipeline
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
-			ID:        fmt.Sprintf("enum-otx-%d", time.Now().UnixNano()),
+			ID:        newNodeID("enum-otx"),
 			SeedID:    seed.ID,
 			Status:    "running",
 			CreatedAt: time.Now(),
@@ -53,13 +54,14 @@ func (c *AlienVaultCollector) Process(ctx context.Context, pCtx *models.Pipeline
 			// AlienVault API Indicator Endpoint
 			url := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", baseDomain)
 
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err != nil {
-				newErrors = append(newErrors, err)
-				continue
-			}
-
-			resp, err := c.client.Do(req)
+			resp, err := fetchutil.DoRequest(ctx, c.client, func(ctx context.Context) (*http.Request, error) {
+				retryReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+				if err != nil {
+					return nil, err
+				}
+				retryReq.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
+				return retryReq, nil
+			})
 			if err != nil {
 				newErrors = append(newErrors, err)
 				continue
@@ -87,7 +89,7 @@ func (c *AlienVaultCollector) Process(ctx context.Context, pCtx *models.Pipeline
 			for _, record := range otxResp.PassiveDNS {
 				if record.Hostname != "" {
 					newAssets = append(newAssets, models.Asset{
-						ID:            fmt.Sprintf("dom-otx-%d", time.Now().UnixNano()),
+						ID:            newNodeID("dom-otx"),
 						EnumerationID: enum.ID,
 						Type:          models.AssetTypeDomain,
 						Identifier:    record.Hostname,

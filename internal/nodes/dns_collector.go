@@ -27,7 +27,7 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
-			ID:        fmt.Sprintf("enum-dns-%d", time.Now().UnixNano()),
+			ID:        newNodeID("enum-dns"),
 			SeedID:    seed.ID,
 			Status:    "running",
 			CreatedAt: time.Now(),
@@ -48,7 +48,7 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 
 			// Add the Domain Asset
 			domainAsset := models.Asset{
-				ID:            fmt.Sprintf("dom-%d", time.Now().UnixNano()),
+				ID:            newNodeID("dom"),
 				EnumerationID: enum.ID,
 				Type:          models.AssetTypeDomain,
 				Identifier:    baseDomain,
@@ -71,7 +71,7 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				// Register the distinct IP Asset
 				newAssets = append(newAssets, models.Asset{
-					ID:            fmt.Sprintf("ip-%d", time.Now().UnixNano()),
+					ID:            newNodeID("ip"),
 					EnumerationID: enum.ID,
 					Type:          models.AssetTypeIP,
 					Identifier:    ip.String(),

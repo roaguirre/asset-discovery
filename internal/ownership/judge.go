@@ -23,7 +23,9 @@ const (
 	LLMEndpointEnv = "ASSET_DISCOVERY_OWNERSHIP_LLM_ENDPOINT"
 
 	defaultLLMBaseURL   = "https://api.openai.com/v1"
+	defaultLLMModel     = "gpt-5.4-nano"
 	defaultDecisionKind = "ownership_judged"
+	openAIAPIKeyEnv     = "OPENAI_API_KEY"
 )
 
 type Judge interface {
@@ -109,13 +111,16 @@ func NewDefaultJudge() Judge {
 
 func NewJudgeFromEnv() (Judge, error) {
 	model := strings.TrimSpace(os.Getenv(LLMModelEnv))
+	apiKey := firstNonEmptyEnv(LLMAPIKeyEnv, openAIAPIKeyEnv)
+	baseURL := strings.TrimSpace(os.Getenv(LLMBaseURLEnv))
+	endpoint := strings.TrimSpace(os.Getenv(LLMEndpointEnv))
+
+	if model == "" && apiKey != "" {
+		model = defaultLLMModel
+	}
 	if model == "" {
 		return nil, nil
 	}
-
-	apiKey := strings.TrimSpace(os.Getenv(LLMAPIKeyEnv))
-	baseURL := strings.TrimSpace(os.Getenv(LLMBaseURLEnv))
-	endpoint := strings.TrimSpace(os.Getenv(LLMEndpointEnv))
 
 	if endpoint == "" {
 		if baseURL == "" {
@@ -134,6 +139,16 @@ func NewJudgeFromEnv() (Judge, error) {
 		apiKey:   apiKey,
 		endpoint: endpoint,
 	}, nil
+}
+
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (j *llmJudge) EvaluateCandidates(ctx context.Context, request Request) ([]Decision, error) {

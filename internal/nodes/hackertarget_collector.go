@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"asset-discovery/internal/discovery"
+	"asset-discovery/internal/fetchutil"
 	"asset-discovery/internal/models"
 )
 
@@ -32,7 +35,7 @@ func (c *HackerTargetCollector) Process(ctx context.Context, pCtx *models.Pipeli
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
-			ID:        fmt.Sprintf("enum-ht-%d", time.Now().UnixNano()),
+			ID:        newNodeID("enum-ht"),
 			SeedID:    seed.ID,
 			Status:    "running",
 			CreatedAt: time.Now(),
@@ -46,16 +49,12 @@ func (c *HackerTargetCollector) Process(ctx context.Context, pCtx *models.Pipeli
 			// HackerTarget Host Search API (Forward/Reverse DNS mapping)
 			url := fmt.Sprintf("https://api.hackertarget.com/hostsearch/?q=%s", baseDomain)
 
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err != nil {
-				newErrors = append(newErrors, err)
-				continue
-			}
-
 			// Add a slight delay to respect public rate limits before sending (if scaling up)
 			// time.Sleep(500 * time.Millisecond)
 
-			resp, err := c.client.Do(req)
+			resp, err := fetchutil.DoRequest(ctx, c.client, func(ctx context.Context) (*http.Request, error) {
+				return http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			})
 			if err != nil {
 				newErrors = append(newErrors, err)
 				continue
@@ -74,42 +73,50 @@ func (c *HackerTargetCollector) Process(ctx context.Context, pCtx *models.Pipeli
 				continue
 			}
 
+			if err := hackertargetBodyError(string(body)); err != nil {
+				newErrors = append(newErrors, fmt.Errorf("hackertarget for %s: %w", baseDomain, err))
+				continue
+			}
+
 			// HackerTarget returns CSV like: subdomain.domain.com,1.2.3.4
 			lines := strings.Split(string(body), "\n")
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
-				if line == "" || strings.HasPrefix(line, "error ") {
+				if line == "" || strings.HasPrefix(strings.ToLower(line), "error ") {
 					continue
 				}
 
 				parts := strings.SplitN(line, ",", 2)
-				if len(parts) >= 1 {
-					subdomain := parts[0]
+				if len(parts) != 2 {
+					continue
+				}
 
-					// Add Domain Asset
+				subdomain := discovery.NormalizeDomainIdentifier(parts[0])
+				if !isAcceptedDomainIdentifier(subdomain) {
+					continue
+				}
+
+				newAssets = append(newAssets, models.Asset{
+					ID:            newNodeID("dom-ht"),
+					EnumerationID: enum.ID,
+					Type:          models.AssetTypeDomain,
+					Identifier:    subdomain,
+					Source:        "hackertarget_collector",
+					DiscoveryDate: time.Now(),
+					DomainDetails: &models.DomainDetails{},
+				})
+
+				ip := strings.TrimSpace(parts[1])
+				if parsedIP := net.ParseIP(ip); parsedIP != nil {
 					newAssets = append(newAssets, models.Asset{
-						ID:            fmt.Sprintf("dom-ht-%d", time.Now().UnixNano()),
+						ID:            newNodeID("ip-ht"),
 						EnumerationID: enum.ID,
-						Type:          models.AssetTypeDomain,
-						Identifier:    subdomain,
+						Type:          models.AssetTypeIP,
+						Identifier:    parsedIP.String(),
 						Source:        "hackertarget_collector",
 						DiscoveryDate: time.Now(),
-						DomainDetails: &models.DomainDetails{},
+						IPDetails:     &models.IPDetails{},
 					})
-
-					// If IP is present, add IP Asset too
-					if len(parts) == 2 && parts[1] != "" {
-						ip := parts[1]
-						newAssets = append(newAssets, models.Asset{
-							ID:            fmt.Sprintf("ip-ht-%d", time.Now().UnixNano()),
-							EnumerationID: enum.ID,
-							Type:          models.AssetTypeIP,
-							Identifier:    ip,
-							Source:        "hackertarget_collector",
-							DiscoveryDate: time.Now(),
-							IPDetails:     &models.IPDetails{},
-						})
-					}
 				}
 			}
 		}
@@ -122,4 +129,38 @@ func (c *HackerTargetCollector) Process(ctx context.Context, pCtx *models.Pipeli
 	pCtx.Unlock()
 
 	return pCtx, nil
+}
+
+func hackertargetBodyError(body string) error {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return nil
+	}
+
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "error "):
+		return fmt.Errorf("%s", trimmed)
+	case strings.Contains(lower, "api count exceeded"),
+		strings.Contains(lower, "increase quota with membership"),
+		strings.Contains(lower, "too many requests"):
+		return fmt.Errorf("%s", trimmed)
+	default:
+		return nil
+	}
+}
+
+func isAcceptedDomainIdentifier(candidate string) bool {
+	candidate = discovery.NormalizeDomainIdentifier(candidate)
+	if candidate == "" {
+		return false
+	}
+
+	for _, extracted := range discovery.ExtractDomainCandidates(candidate) {
+		if extracted == candidate {
+			return true
+		}
+	}
+
+	return false
 }

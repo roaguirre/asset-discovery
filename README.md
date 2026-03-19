@@ -53,6 +53,8 @@ export ASSET_DISCOVERY_WEB_HINT_LLM_BASE_URL="https://your-provider.example/v1"
 export ASSET_DISCOVERY_WEB_HINT_LLM_ENDPOINT="https://your-provider.example/v1/chat/completions"
 ```
 
+If `OPENAI_API_KEY` is set, the web-hint judge now enables itself by default using OpenAI's default Chat Completions endpoint and the `gpt-5.4-nano` model. You only need the explicit `ASSET_DISCOVERY_WEB_HINT_*` variables when you want to override the model, key, or endpoint.
+
 Set these environment variables to enable the broader ownership judge used by registration and PTR pivots:
 
 ```bash
@@ -64,6 +66,8 @@ export ASSET_DISCOVERY_OWNERSHIP_LLM_BASE_URL="https://your-provider.example/v1"
 # Or provide the full chat-completions endpoint directly.
 export ASSET_DISCOVERY_OWNERSHIP_LLM_ENDPOINT="https://your-provider.example/v1/chat/completions"
 ```
+
+Likewise, if `OPENAI_API_KEY` is set, the ownership judge now defaults to OpenAI's `gpt-5.4-nano` model and endpoint automatically. That enables the LLM-gated ownership pivots used by `reverse_registration_collector`, `asn_cidr_collector`, and `ip_enricher` without extra configuration.
 
 If either judge is not configured, its ownership decisions are skipped rather than falling back to hardcoded heuristics.
 

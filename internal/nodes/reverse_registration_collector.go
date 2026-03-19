@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"asset-discovery/internal/discovery"
+	"asset-discovery/internal/fetchutil"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/ownership"
 	"asset-discovery/internal/registration"
@@ -31,7 +32,7 @@ type ReverseRegistrationCollector struct {
 
 func NewReverseRegistrationCollector() *ReverseRegistrationCollector {
 	collector := &ReverseRegistrationCollector{
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 60 * time.Second},
 	}
 	collector.searchCT = collector.searchCertificateTransparency
 	collector.lookupDomain = func(ctx context.Context, domain string) (*models.RDAPData, error) {
@@ -56,7 +57,7 @@ func (c *ReverseRegistrationCollector) Process(ctx context.Context, pCtx *models
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
-			ID:        fmt.Sprintf("enum-revreg-%d", time.Now().UnixNano()),
+			ID:        newNodeID("enum-revreg"),
 			SeedID:    seed.ID,
 			Status:    "running",
 			CreatedAt: time.Now(),
@@ -222,7 +223,7 @@ func (c *ReverseRegistrationCollector) Process(ctx context.Context, pCtx *models
 			}
 
 			newAssets = append(newAssets, models.Asset{
-				ID:            fmt.Sprintf("dom-revreg-%d", time.Now().UnixNano()),
+				ID:            newNodeID("dom-revreg"),
 				EnumerationID: enum.ID,
 				Type:          models.AssetTypeDomain,
 				Identifier:    decision.Root,
@@ -257,13 +258,14 @@ func (c *ReverseRegistrationCollector) Process(ctx context.Context, pCtx *models
 func (c *ReverseRegistrationCollector) searchCertificateTransparency(ctx context.Context, term string) ([]string, error) {
 	url := "https://crt.sh/?q=" + url.QueryEscape(term) + "&output=json"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
-
-	resp, err := c.client.Do(req)
+	resp, err := fetchutil.DoRequest(ctx, c.client, func(ctx context.Context) (*http.Request, error) {
+		retryReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		retryReq.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
+		return retryReq, nil
+	})
 	if err != nil {
 		return nil, err
 	}

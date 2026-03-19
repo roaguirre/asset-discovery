@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 	"golang.org/x/net/html"
 
 	"asset-discovery/internal/discovery"
+	"asset-discovery/internal/fetchutil"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/webhint"
 )
@@ -61,7 +61,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
-			ID:        fmt.Sprintf("enum-web-hint-%d", time.Now().UnixNano()),
+			ID:        newNodeID("enum-web-hint"),
 			SeedID:    seed.ID,
 			Status:    "running",
 			CreatedAt: time.Now(),
@@ -88,14 +88,14 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				judgeBaseDomain = baseDomain
 			}
 			for _, target := range c.buildTargets(baseDomain) {
-				req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
-				if err != nil {
-					newErrors = append(newErrors, err)
-					continue
-				}
-				req.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
-
-				resp, err := c.client.Do(req)
+				resp, err := fetchutil.DoRequest(ctx, c.client, func(ctx context.Context) (*http.Request, error) {
+					retryReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
+					if err != nil {
+						return nil, err
+					}
+					retryReq.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
+					return retryReq, nil
+				})
 				if err != nil {
 					continue
 				}
@@ -156,7 +156,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 
 		for root, evidences := range signalsByRoot {
 			newAssets = append(newAssets, models.Asset{
-				ID:            fmt.Sprintf("dom-web-hint-%d", time.Now().UnixNano()),
+				ID:            newNodeID("dom-web-hint"),
 				EnumerationID: enum.ID,
 				Type:          models.AssetTypeDomain,
 				Identifier:    root,

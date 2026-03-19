@@ -372,6 +372,85 @@ func TestReverseRegistrationCollector_SkipsUnvalidatedCandidate(t *testing.T) {
 	}
 }
 
+func TestHackerTargetCollector_RejectsQuotaMessage(t *testing.T) {
+	collector := NewHackerTargetCollector()
+	collector.client = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					"API count exceeded - Increase Quota with Membership",
+				)),
+				Request: req,
+			}, nil
+		}),
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to complete with recorded errors, got %v", err)
+	}
+
+	if len(pCtx.Assets) != 0 {
+		t.Fatalf("expected quota payload to produce no assets, got %+v", pCtx.Assets)
+	}
+	if len(pCtx.Errors) == 0 {
+		t.Fatalf("expected quota payload to be recorded as an error")
+	}
+}
+
+func TestHackerTargetCollector_RetriesTransientStatus(t *testing.T) {
+	attempts := 0
+	collector := NewHackerTargetCollector()
+	collector.client = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			if attempts == 1 {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("busy")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("www.example.com,203.0.113.10\n")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	if !assetExists(pCtx.Assets, "www.example.com") {
+		t.Fatalf("expected retried response to produce the domain asset, got %+v", pCtx.Assets)
+	}
+	if !assetExists(pCtx.Assets, "203.0.113.10") {
+		t.Fatalf("expected retried response to produce the IP asset, got %+v", pCtx.Assets)
+	}
+}
+
 func seedExists(seeds []models.Seed, domain string) bool {
 	for _, seed := range seeds {
 		for _, candidate := range seed.Domains {

@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"asset-discovery/internal/discovery"
+	"asset-discovery/internal/fetchutil"
 	"asset-discovery/internal/models"
 
 	"github.com/likexian/whois"
@@ -18,6 +20,12 @@ import (
 )
 
 var ErrUnsupportedRegistrationData = errors.New("registration data unavailable")
+
+const (
+	whoisMaxAttempts    = 3
+	whoisInitialBackoff = 250 * time.Millisecond
+	whoisMaxBackoff     = 2 * time.Second
+)
 
 type rdapEntity struct {
 	Roles     []string `json:"roles,omitempty"`
@@ -42,15 +50,15 @@ type rdapResponse struct {
 func LookupDomain(ctx context.Context, client *http.Client, domain string) (*models.RDAPData, error) {
 	url := fmt.Sprintf("https://rdap.org/domain/%s", domain)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Accept", "application/rdap+json")
-	req.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
-
-	resp, err := client.Do(req)
+	resp, err := fetchutil.DoRequest(ctx, client, func(ctx context.Context) (*http.Request, error) {
+		retryReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		retryReq.Header.Set("Accept", "application/rdap+json")
+		retryReq.Header.Set("User-Agent", "Asset-Discovery-Bot/1.0")
+		return retryReq, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +66,7 @@ func LookupDomain(ctx context.Context, client *http.Client, domain string) (*mod
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusNotFound {
-			return lookupDomainWHOIS(domain)
+			return lookupDomainWHOIS(ctx, domain)
 		}
 		return nil, fmt.Errorf("unexpected status code %d from RDAP for %s", resp.StatusCode, domain)
 	}
@@ -126,13 +134,19 @@ func LookupDomain(ctx context.Context, client *http.Client, domain string) (*mod
 	return data, nil
 }
 
-func lookupDomainWHOIS(domain string) (*models.RDAPData, error) {
-	whoisRaw, err := whois.Whois(domain)
+func lookupDomainWHOIS(ctx context.Context, domain string) (*models.RDAPData, error) {
+	return lookupDomainWHOISWith(ctx, domain, func(domain string) (string, error) {
+		return whois.Whois(domain)
+	}, whoisparser.Parse)
+}
+
+func lookupDomainWHOISWith(ctx context.Context, domain string, lookup func(string) (string, error), parse func(string) (whoisparser.WhoisInfo, error)) (*models.RDAPData, error) {
+	whoisRaw, err := retryWHOISLookup(ctx, domain, lookup)
 	if err != nil {
 		return nil, fmt.Errorf("WHOIS lookup failed for %s: %w", domain, err)
 	}
 
-	parsed, err := whoisparser.Parse(whoisRaw)
+	parsed, err := parse(whoisRaw)
 	if err != nil {
 		return nil, ErrUnsupportedRegistrationData
 	}
@@ -172,6 +186,83 @@ func lookupDomainWHOIS(domain string) (*models.RDAPData, error) {
 	}
 
 	return data, nil
+}
+
+func retryWHOISLookup(ctx context.Context, domain string, lookup func(string) (string, error)) (string, error) {
+	backoff := whoisInitialBackoff
+	var lastErr error
+
+	for attempt := 1; attempt <= whoisMaxAttempts; attempt++ {
+		if ctx != nil && ctx.Err() != nil {
+			if lastErr != nil {
+				return "", lastErr
+			}
+			return "", ctx.Err()
+		}
+
+		raw, err := lookup(domain)
+		if err == nil {
+			return raw, nil
+		}
+
+		lastErr = err
+		if attempt == whoisMaxAttempts || !shouldRetryWHOISError(ctx, err) {
+			break
+		}
+
+		wait := backoff
+		if wait <= 0 {
+			wait = 100 * time.Millisecond
+		}
+		if wait > whoisMaxBackoff {
+			wait = whoisMaxBackoff
+		}
+
+		timer := time.NewTimer(wait)
+		if ctx == nil {
+			<-timer.C
+		} else {
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return "", ctx.Err()
+			}
+		}
+
+		if backoff <= 0 {
+			backoff = 100 * time.Millisecond
+		} else {
+			backoff *= 2
+			if backoff > whoisMaxBackoff {
+				backoff = whoisMaxBackoff
+			}
+		}
+	}
+
+	return "", lastErr
+}
+
+func shouldRetryWHOISError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	return true
 }
 
 type rdapVCard struct {
