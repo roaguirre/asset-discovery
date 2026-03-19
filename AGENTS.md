@@ -17,6 +17,7 @@ This file describes how AI coding assistants should interact with this repositor
 4.  **Strict Typing**: Ensure all JSON tags are strictly defined and follow idiomatic Go (e.g. `json:"company_name,omitempty"`).
 5.  **Local Testing First**: The app must remain operable from a simple local CLI (`cmd/discover/main.go`).
 6.  **No Global State**: Avoid `init()` functions that mutate global variables, pass dependencies explicitely.
+7.  **Deterministic Parsing vs Ownership Reasoning**: Use deterministic code for protocol parsing, normalization, extraction, deduplication, and other stable mechanical transforms. When the task is to judge ownership, first-party scope, or whether a discovered candidate should be collected or promoted despite ambiguous evidence, prefer an LLM judge over hardcoded heuristics. Heuristics may generate candidates or evidence, but they must not silently make final ownership decisions.
 
 ### Adding New Stages
 To add a new stage to the DAG:

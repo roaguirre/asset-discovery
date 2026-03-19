@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings" // Added for strings.Contains
 
+	"asset-discovery/internal/discovery"
 	"asset-discovery/internal/models"
 )
 
@@ -53,9 +54,12 @@ func (f *MergeFilter) Process(ctx context.Context, pCtx *models.PipelineContext)
 			// Combine DNS Records
 			existing.DomainDetails.Records = append(existing.DomainDetails.Records, a.DomainDetails.Records...)
 
-			// Take RDAP if existing lacks it
-			if a.DomainDetails.RDAP != nil && existing.DomainDetails.RDAP == nil {
-				existing.DomainDetails.RDAP = a.DomainDetails.RDAP
+			if a.DomainDetails.RDAP != nil {
+				if existing.DomainDetails.RDAP == nil {
+					existing.DomainDetails.RDAP = a.DomainDetails.RDAP
+				} else {
+					mergeRDAPData(existing.DomainDetails.RDAP, a.DomainDetails.RDAP)
+				}
 			}
 		}
 
@@ -92,4 +96,40 @@ func (f *MergeFilter) Process(ctx context.Context, pCtx *models.PipelineContext)
 	log.Printf("[Merge Filter] Compressed pipeline from %d raw records down to %d unique merged assets.", len(pCtx.Assets), len(finalAssets))
 	pCtx.Assets = finalAssets
 	return pCtx, nil
+}
+
+func mergeRDAPData(existing, incoming *models.RDAPData) {
+	if existing == nil || incoming == nil {
+		return
+	}
+
+	if existing.RegistrarName == "" {
+		existing.RegistrarName = incoming.RegistrarName
+	}
+	if existing.RegistrarIANAID == "" {
+		existing.RegistrarIANAID = incoming.RegistrarIANAID
+	}
+	if existing.CreationDate.IsZero() {
+		existing.CreationDate = incoming.CreationDate
+	}
+	if existing.ExpirationDate.IsZero() {
+		existing.ExpirationDate = incoming.ExpirationDate
+	}
+	if existing.UpdatedDate.IsZero() {
+		existing.UpdatedDate = incoming.UpdatedDate
+	}
+	if existing.RegistrantName == "" {
+		existing.RegistrantName = incoming.RegistrantName
+	}
+	if existing.RegistrantEmail == "" {
+		existing.RegistrantEmail = incoming.RegistrantEmail
+	}
+	if existing.RegistrantOrg == "" {
+		existing.RegistrantOrg = incoming.RegistrantOrg
+	}
+
+	existing.Statuses = append(existing.Statuses, incoming.Statuses...)
+	existing.NameServers = append(existing.NameServers, incoming.NameServers...)
+	existing.Statuses = discovery.UniqueLowerStrings(existing.Statuses)
+	existing.NameServers = discovery.UniqueLowerStrings(existing.NameServers)
 }

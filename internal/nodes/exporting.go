@@ -13,6 +13,7 @@ import (
 
 	"github.com/xuri/excelize/v2"
 
+	"asset-discovery/internal/exportutil"
 	"asset-discovery/internal/models"
 )
 
@@ -43,7 +44,7 @@ func (e *JSONExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	// Encode JSON securely
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(buildJSONExportAssets(pCtx.Assets)); err != nil {
+	if err := encoder.Encode(exportutil.BuildJSONExportAssets(pCtx.Assets)); err != nil {
 		return pCtx, fmt.Errorf("failed to encode JSON output: %w", err)
 	}
 
@@ -83,16 +84,16 @@ func (e *CSVExporter) Process(ctx context.Context, pCtx *models.PipelineContext)
 	}
 
 	// Write rows
-	for _, asset := range sortedAssetsForExport(pCtx.Assets) {
-		classified := classifyAsset(asset)
+	for _, asset := range exportutil.SortedAssetsForExport(pCtx.Assets) {
+		classified := exportutil.ClassifyAsset(asset)
 		row := []string{
 			asset.ID,
-			string(classified.domainKind),
-			classified.registrableDomain,
+			string(classified.DomainKind),
+			classified.RegistrableDomain,
 			string(asset.Type),
 			asset.Identifier,
 			asset.Source,
-			formatDateTime(asset.DiscoveryDate),
+			exportutil.FormatDateTime(asset.DiscoveryDate),
 		}
 		if err := writer.Write(row); err != nil {
 			return pCtx, fmt.Errorf("failed to write CSV row: %w", err)
@@ -152,11 +153,11 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 	ipRowIdx := 2
 
 	// Write rows
-	for _, asset := range sortedAssetsForExport(pCtx.Assets) {
-		classified := classifyAsset(asset)
+	for _, asset := range exportutil.SortedAssetsForExport(pCtx.Assets) {
+		classified := exportutil.ClassifyAsset(asset)
 
 		if asset.Type == models.AssetTypeDomain {
-			if classified.domainKind == models.DomainKindRegistrable {
+			if classified.DomainKind == models.DomainKindRegistrable {
 				var registrar, created, updated, expires, registrantOrg, nsStr string
 				if asset.DomainDetails != nil && asset.DomainDetails.RDAP != nil {
 					rdap := asset.DomainDetails.RDAP
@@ -176,9 +177,9 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				row := []interface{}{
 					asset.ID,
-					classified.registrableDomain,
+					classified.RegistrableDomain,
 					asset.Source,
-					formatDateTime(asset.DiscoveryDate),
+					exportutil.FormatDateTime(asset.DiscoveryDate),
 					registrar,
 					created,
 					updated,
@@ -212,10 +213,10 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				row := []interface{}{
 					asset.ID,
-					classified.registrableDomain,
+					classified.RegistrableDomain,
 					asset.Identifier,
 					asset.Source,
-					formatDateTime(asset.DiscoveryDate),
+					exportutil.FormatDateTime(asset.DiscoveryDate),
 					strings.Join(aRecs, ", "),
 					strings.Join(aaaaRecs, ", "),
 					strings.Join(cnameRecs, ", "),
@@ -250,7 +251,7 @@ func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext
 				asset.ID,
 				asset.Identifier,
 				asset.Source,
-				formatDateTime(asset.DiscoveryDate),
+				exportutil.FormatDateTime(asset.DiscoveryDate),
 				asn,
 				org,
 				ptr,

@@ -10,11 +10,13 @@ import (
 // Seed represents the starting point for discovery.
 // A Seed can contain various indicators that help OSINT collectors find assets.
 type Seed struct {
-	ID          string   `json:"id"`
-	CompanyName string   `json:"company_name,omitempty"`
-	Domains     []string `json:"domains,omitempty"` // e.g., ["google.com", "alphabet.com"]
-	Address     string   `json:"address,omitempty"`
-	Industry    string   `json:"industry,omitempty"`
+	ID          string         `json:"id"`
+	CompanyName string         `json:"company_name,omitempty"`
+	Domains     []string       `json:"domains,omitempty"` // e.g., ["google.com", "alphabet.com"]
+	Address     string         `json:"address,omitempty"`
+	Industry    string         `json:"industry,omitempty"`
+	Confidence  float64        `json:"confidence,omitempty"`
+	Evidence    []SeedEvidence `json:"evidence,omitempty"`
 
 	// Additional Discovery Vectors
 	ASN  []int    `json:"asn,omitempty"`  // Autonomous System Numbers owned by the company
@@ -22,6 +24,15 @@ type Seed struct {
 
 	// Metadata
 	Tags []string `json:"tags,omitempty"` // e.g., ["internal", "acquisition", "out-of-scope"]
+}
+
+// SeedEvidence describes the provenance behind an auto-discovered seed.
+type SeedEvidence struct {
+	Source     string  `json:"source"`
+	Kind       string  `json:"kind"`
+	Value      string  `json:"value,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Reasoned   bool    `json:"reasoned,omitempty"`
 }
 
 // Enumeration represents a specific discovery run for a Seed.
@@ -108,8 +119,17 @@ type PipelineContext struct {
 	collectionSeeds    []Seed
 	pendingSeeds       []Seed
 	knownSeedKeys      map[string]struct{}
+	candidateSeeds     map[string]*seedCandidate
 	collectionDepth    int
 	maxCollectionDepth int
+}
+
+type seedCandidate struct {
+	seed          Seed
+	evidence      []SeedEvidence
+	signalKeys    map[string]struct{}
+	maxConfidence float64
+	reasoned      bool
 }
 
 // Lock acquires the mutex for safe concurrent mutation of the context.
@@ -136,14 +156,28 @@ func (p *PipelineContext) InitializeSeedFrontier(maxDepth int) {
 	p.pendingSeeds = nil
 	p.collectionSeeds = nil
 	p.knownSeedKeys = make(map[string]struct{}, len(p.Seeds))
+	p.candidateSeeds = make(map[string]*seedCandidate)
 
+	mergedSeeds := make(map[string]Seed, len(p.Seeds))
+	seedOrder := make([]string, 0, len(p.Seeds))
 	for _, seed := range p.Seeds {
+		seed = normalizeSeed(seed)
 		key := seedKey(seed)
-		if _, exists := p.knownSeedKeys[key]; exists {
+		if existing, exists := mergedSeeds[key]; exists {
+			mergedSeeds[key] = mergeSeeds(existing, seed)
 			continue
 		}
 
+		mergedSeeds[key] = seed
+		seedOrder = append(seedOrder, key)
+	}
+
+	p.Seeds = make([]Seed, 0, len(seedOrder))
+	p.collectionSeeds = make([]Seed, 0, len(seedOrder))
+	for _, key := range seedOrder {
+		seed := mergedSeeds[key]
 		p.knownSeedKeys[key] = struct{}{}
+		p.Seeds = append(p.Seeds, seed)
 		p.collectionSeeds = append(p.collectionSeeds, seed)
 	}
 }
@@ -165,14 +199,89 @@ func (p *PipelineContext) EnqueueSeed(seed Seed) bool {
 		return false
 	}
 
+	seed = normalizeSeed(seed)
 	key := seedKey(seed)
 	if _, exists := p.knownSeedKeys[key]; exists {
+		p.mergeSeedAcrossSlicesLocked(seed)
 		return false
 	}
 
+	delete(p.candidateSeeds, key)
 	p.knownSeedKeys[key] = struct{}{}
 	p.Seeds = append(p.Seeds, seed)
 	p.pendingSeeds = append(p.pendingSeeds, seed)
+
+	return true
+}
+
+// EnqueueSeedCandidate records evidence for an auto-discovered seed and promotes it once
+// it has either a reasoned approval, one strong signal, or at least two distinct weaker signals.
+func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence) bool {
+	p.Lock()
+	defer p.Unlock()
+
+	if p.collectionDepth >= p.maxCollectionDepth {
+		return false
+	}
+
+	seed = normalizeSeed(seed)
+	evidence = normalizeSeedEvidence(evidence)
+
+	key := seedKey(seed)
+	if _, exists := p.knownSeedKeys[key]; exists {
+		p.mergeSeedAcrossSlicesLocked(seed, evidence)
+		return false
+	}
+
+	candidate, exists := p.candidateSeeds[key]
+	if !exists {
+		candidate = &seedCandidate{
+			seed:       seed,
+			evidence:   append([]SeedEvidence(nil), seed.Evidence...),
+			signalKeys: make(map[string]struct{}),
+		}
+		candidate.maxConfidence = seed.Confidence
+		if hasReasonedSeedEvidence(seed.Evidence) {
+			candidate.reasoned = true
+		}
+		p.candidateSeeds[key] = candidate
+	} else {
+		candidate.seed = mergeSeeds(candidate.seed, seed)
+		candidate.evidence = mergeSeedEvidence(candidate.evidence, seed.Evidence...)
+		if seed.Confidence > candidate.maxConfidence {
+			candidate.maxConfidence = seed.Confidence
+		}
+		if hasReasonedSeedEvidence(seed.Evidence) {
+			candidate.reasoned = true
+		}
+	}
+
+	candidate.evidence = mergeSeedEvidence(candidate.evidence, evidence)
+	if evidence.Source != "" && evidence.Kind != "" {
+		signalKey := evidence.Source + "|" + evidence.Kind
+		if _, seen := candidate.signalKeys[signalKey]; !seen {
+			candidate.signalKeys[signalKey] = struct{}{}
+		}
+		if evidence.Confidence > candidate.maxConfidence {
+			candidate.maxConfidence = evidence.Confidence
+		}
+	}
+	if evidence.Reasoned {
+		candidate.reasoned = true
+	}
+
+	if !shouldPromoteSeedCandidate(candidate) {
+		return false
+	}
+
+	promoted := candidate.seed
+	promoted.Confidence = candidate.maxConfidence
+	promoted.Evidence = append([]SeedEvidence(nil), candidate.evidence...)
+
+	delete(p.candidateSeeds, key)
+	p.knownSeedKeys[key] = struct{}{}
+	p.Seeds = append(p.Seeds, promoted)
+	p.pendingSeeds = append(p.pendingSeeds, promoted)
 
 	return true
 }
@@ -208,10 +317,220 @@ func seedKey(seed Seed) string {
 
 	sort.Strings(domains)
 
-	key := company + "|" + strings.Join(domains, ",")
-	if key == "|" {
-		return strings.TrimSpace(seed.ID)
+	if len(domains) > 0 {
+		return strings.Join(domains, ",")
 	}
 
-	return key
+	if company != "" {
+		return company
+	}
+
+	return strings.TrimSpace(seed.ID)
+}
+
+func shouldPromoteSeedCandidate(candidate *seedCandidate) bool {
+	if candidate == nil {
+		return false
+	}
+
+	if candidate.reasoned {
+		return true
+	}
+
+	if candidate.maxConfidence >= 0.9 {
+		return true
+	}
+
+	return len(candidate.signalKeys) >= 2
+}
+
+func normalizeSeed(seed Seed) Seed {
+	seed.ID = strings.TrimSpace(seed.ID)
+	seed.CompanyName = strings.TrimSpace(seed.CompanyName)
+	seed.Address = strings.TrimSpace(seed.Address)
+	seed.Industry = strings.TrimSpace(seed.Industry)
+	seed.Domains = uniqueNormalizedStrings(seed.Domains)
+	seed.ASN = uniqueInts(seed.ASN)
+	seed.CIDR = uniqueNormalizedStrings(seed.CIDR)
+	seed.Tags = uniqueNormalizedStrings(seed.Tags)
+	seed.Evidence = normalizeSeedEvidenceSlice(seed.Evidence)
+	return seed
+}
+
+func normalizeSeedEvidence(evidence SeedEvidence) SeedEvidence {
+	evidence.Source = strings.TrimSpace(strings.ToLower(evidence.Source))
+	evidence.Kind = strings.TrimSpace(strings.ToLower(evidence.Kind))
+	evidence.Value = strings.TrimSpace(strings.ToLower(evidence.Value))
+	return evidence
+}
+
+func mergeSeeds(existing, incoming Seed) Seed {
+	if existing.ID == "" {
+		existing.ID = incoming.ID
+	}
+	if existing.CompanyName == "" {
+		existing.CompanyName = incoming.CompanyName
+	} else if incoming.CompanyName != "" && !strings.EqualFold(existing.CompanyName, incoming.CompanyName) {
+		existing.Evidence = append(existing.Evidence, SeedEvidence{
+			Source: "seed_merge",
+			Kind:   "company_name",
+			Value:  strings.ToLower(strings.TrimSpace(incoming.CompanyName)),
+		})
+	}
+	if existing.Address == "" {
+		existing.Address = incoming.Address
+	}
+	if existing.Industry == "" {
+		existing.Industry = incoming.Industry
+	}
+	if incoming.Confidence > existing.Confidence {
+		existing.Confidence = incoming.Confidence
+	}
+	existing.ASN = append(existing.ASN, incoming.ASN...)
+	existing.Domains = append(existing.Domains, incoming.Domains...)
+	existing.CIDR = append(existing.CIDR, incoming.CIDR...)
+	existing.Tags = append(existing.Tags, incoming.Tags...)
+	existing.Evidence = mergeSeedEvidence(existing.Evidence, incoming.Evidence...)
+	existing.ASN = uniqueInts(existing.ASN)
+	existing.Domains = uniqueNormalizedStrings(existing.Domains)
+	existing.CIDR = uniqueNormalizedStrings(existing.CIDR)
+	existing.Tags = uniqueNormalizedStrings(existing.Tags)
+	return existing
+}
+
+func (p *PipelineContext) mergeSeedAcrossSlicesLocked(seed Seed, evidence ...SeedEvidence) {
+	key := seedKey(seed)
+	p.mergeSeedIntoSlice(p.Seeds, key, seed, evidence...)
+	p.mergeSeedIntoSlice(p.collectionSeeds, key, seed, evidence...)
+	p.mergeSeedIntoSlice(p.pendingSeeds, key, seed, evidence...)
+
+	if candidate, exists := p.candidateSeeds[key]; exists {
+		candidate.seed = mergeSeeds(candidate.seed, seed)
+		candidate.evidence = mergeSeedEvidence(candidate.evidence, seed.Evidence...)
+		candidate.evidence = mergeSeedEvidence(candidate.evidence, evidence...)
+		if seed.Confidence > candidate.maxConfidence {
+			candidate.maxConfidence = seed.Confidence
+		}
+		if hasReasonedSeedEvidence(seed.Evidence) {
+			candidate.reasoned = true
+		}
+		if hasReasonedSeedEvidence(evidence) {
+			candidate.reasoned = true
+		}
+	}
+}
+
+func (p *PipelineContext) mergeSeedIntoSlice(seeds []Seed, key string, incoming Seed, evidence ...SeedEvidence) {
+	for i := range seeds {
+		if seedKey(seeds[i]) == key {
+			seeds[i] = mergeSeeds(seeds[i], incoming)
+			seeds[i].Evidence = mergeSeedEvidence(seeds[i].Evidence, evidence...)
+		}
+	}
+}
+
+func mergeSeedEvidence(existing []SeedEvidence, incoming ...SeedEvidence) []SeedEvidence {
+	if len(incoming) == 0 {
+		return existing
+	}
+
+	index := make(map[string]int, len(existing))
+	for i, evidence := range existing {
+		index[seedEvidenceKey(evidence)] = i
+	}
+
+	for _, evidence := range incoming {
+		evidence = normalizeSeedEvidence(evidence)
+		if evidence.Source == "" && evidence.Kind == "" && evidence.Value == "" {
+			continue
+		}
+
+		key := seedEvidenceKey(evidence)
+		if idx, exists := index[key]; exists {
+			if evidence.Confidence > existing[idx].Confidence {
+				existing[idx].Confidence = evidence.Confidence
+			}
+			if evidence.Reasoned {
+				existing[idx].Reasoned = true
+			}
+			if existing[idx].Value == "" {
+				existing[idx].Value = evidence.Value
+			}
+			continue
+		}
+
+		index[key] = len(existing)
+		existing = append(existing, evidence)
+	}
+
+	return existing
+}
+
+func seedEvidenceKey(evidence SeedEvidence) string {
+	return strings.Join([]string{strings.ToLower(strings.TrimSpace(evidence.Source)), strings.ToLower(strings.TrimSpace(evidence.Kind)), strings.ToLower(strings.TrimSpace(evidence.Value))}, "|")
+}
+
+func hasReasonedSeedEvidence(evidence []SeedEvidence) bool {
+	for _, item := range evidence {
+		if item.Reasoned {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeSeedEvidenceSlice(evidence []SeedEvidence) []SeedEvidence {
+	if len(evidence) == 0 {
+		return nil
+	}
+
+	normalized := make([]SeedEvidence, 0, len(evidence))
+	for _, item := range evidence {
+		item = normalizeSeedEvidence(item)
+		if item.Source == "" && item.Kind == "" && item.Value == "" {
+			continue
+		}
+		normalized = append(normalized, item)
+	}
+	return mergeSeedEvidence(nil, normalized...)
+}
+
+func uniqueNormalizedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func uniqueInts(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[int]struct{}, len(values))
+	out := make([]int, 0, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Ints(out)
+	return out
 }

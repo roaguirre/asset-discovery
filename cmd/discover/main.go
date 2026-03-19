@@ -59,9 +59,12 @@ var rootCmd = &cobra.Command{
 				nodes.NewDNSCollector(),
 				nodes.NewCrtShCollector(),
 				nodes.NewRDAPCollector(),
+				nodes.NewReverseRegistrationCollector(),
 				nodes.NewHackerTargetCollector(),
 				nodes.NewAlienVaultCollector(),
 				nodes.NewWaybackCollector(),
+				nodes.NewASNCIDRCollector(),
+				nodes.NewWebHintCollector(),
 			},
 			Enrichers: []dag.Enricher{
 				nodes.NewDNSResolverEnricher(),

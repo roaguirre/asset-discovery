@@ -10,16 +10,23 @@ import (
 	"sync"
 	"time"
 
+	"asset-discovery/internal/discovery"
 	"asset-discovery/internal/models"
-	"golang.org/x/net/publicsuffix"
+	"asset-discovery/internal/ownership"
 )
 
 // IPEnricher performs fast Reverse DNS (PTR) and ASN/Organization lookups
 // using the Team Cymru DNS service.
-type IPEnricher struct{}
+type IPEnricher struct {
+	judge       ownership.Judge
+	enrichAsset func(*models.Asset)
+}
 
 func NewIPEnricher() *IPEnricher {
-	return &IPEnricher{}
+	return &IPEnricher{
+		judge:       ownership.NewDefaultJudge(),
+		enrichAsset: enrichIP,
+	}
 }
 
 func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
@@ -48,8 +55,28 @@ func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) 
 	concurrencyLimit := 50
 	sem := make(chan struct{}, concurrencyLimit)
 
-	var newPTRsMu sync.Mutex
-	var newPTRs []string
+	seedByID := make(map[string]models.Seed, len(pCtx.Seeds))
+	for _, seed := range pCtx.Seeds {
+		seedByID[seed.ID] = seed
+	}
+
+	enumToSeed := make(map[string]models.Seed, len(pCtx.Enumerations))
+	for _, enum := range pCtx.Enumerations {
+		if seed, ok := seedByID[enum.SeedID]; ok {
+			enumToSeed[enum.ID] = seed
+		}
+	}
+
+	type ptrObservation struct {
+		root  string
+		seed  models.Seed
+		hits  int
+		hosts []string
+	}
+
+	var ptrObservationsMu sync.Mutex
+	ptrObservations := make(map[string]*ptrObservation)
+	ptrFollowUpSeeds := make(map[string]models.Seed)
 
 	for _, asset := range ipAssets {
 		wg.Add(1)
@@ -59,44 +86,164 @@ func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) 
 			defer wg.Done()
 			defer func() { <-sem }() // Release semaphore
 
-			enrichIP(a)
-
-			// Safely track newly discovered PTRs for recursion re-seeding
-			if a.IPDetails != nil && a.IPDetails.PTR != "" {
-				newPTRsMu.Lock()
-				newPTRs = append(newPTRs, a.IPDetails.PTR)
-				newPTRsMu.Unlock()
+			if e.enrichAsset != nil {
+				e.enrichAsset(a)
 			}
+
+			if a.IPDetails == nil || a.IPDetails.PTR == "" {
+				return
+			}
+
+			host := discovery.NormalizeDomainIdentifier(a.IPDetails.PTR)
+			if host == "" || len(discovery.ExtractDomainCandidates(host)) == 0 {
+				return
+			}
+
+			ptrObservationsMu.Lock()
+			if _, exists := ptrFollowUpSeeds[host]; !exists {
+				ptrFollowUpSeeds[host] = buildPTRSeed(enumToSeed[a.EnumerationID], host)
+			}
+
+			root := discovery.RegistrableDomain(host)
+			if root == "" {
+				ptrObservationsMu.Unlock()
+				return
+			}
+
+			observationKey := a.EnumerationID + "|" + root
+
+			observation, exists := ptrObservations[observationKey]
+			if !exists {
+				observation = &ptrObservation{
+					root: root,
+					seed: enumToSeed[a.EnumerationID],
+				}
+				ptrObservations[observationKey] = observation
+			}
+			observation.hits++
+			if len(observation.hosts) < 3 {
+				observation.hosts = append(observation.hosts, a.IPDetails.PTR)
+			}
+			ptrObservationsMu.Unlock()
 		}(asset)
 	}
 
 	wg.Wait()
 	log.Println("[IP Enricher] Finished enriching all IPs.")
 
-	// Hand newly discovered domains back to the engine scheduler as the next collection frontier.
-	for _, ptr := range newPTRs {
-		targets := []string{ptr}
+	for _, seed := range ptrFollowUpSeeds {
+		if pCtx.EnqueueSeed(seed) {
+			log.Printf("[IP Enricher] Scheduled PTR hostname %s for follow-up collection.", seed.Domains[0])
+		}
+	}
 
-		// Also target the registrable root domain if different (to get RDAP/Subdomains)
-		if root, err := publicsuffix.EffectiveTLDPlusOne(ptr); err == nil && root != ptr {
-			targets = append(targets, root)
+	if e.judge == nil || len(ptrObservations) == 0 {
+		return pCtx, nil
+	}
+
+	type judgeGroup struct {
+		seed       models.Seed
+		candidates []ownership.Candidate
+		byRoot     map[string]*ptrObservation
+	}
+
+	groups := make(map[string]*judgeGroup)
+	for _, observation := range ptrObservations {
+		groupKey := observation.seed.ID
+		if groupKey == "" {
+			groupKey = observation.seed.CompanyName + "|" + strings.Join(observation.seed.Domains, ",")
 		}
 
-		for _, target := range targets {
-			newSeed := models.Seed{
-				ID:          fmt.Sprintf("seed-ptr-%d", time.Now().UnixNano()),
-				CompanyName: target,
-				Domains:     []string{target},
-				Tags:        []string{"auto-discovered", "ptr-recursion"},
+		group, exists := groups[groupKey]
+		if !exists {
+			group = &judgeGroup{
+				seed:   observation.seed,
+				byRoot: make(map[string]*ptrObservation),
+			}
+			groups[groupKey] = group
+		}
+
+		evidence := []ownership.EvidenceItem{
+			{
+				Kind:    "ptr_root",
+				Summary: fmt.Sprintf("Observed %d PTR-derived hits for this registrable domain from discovered IP assets", observation.hits),
+			},
+		}
+		if len(observation.hosts) > 0 {
+			evidence = append(evidence, ownership.EvidenceItem{
+				Kind:    "ptr_host_samples",
+				Summary: fmt.Sprintf("Sample PTR hostnames: %s", strings.Join(observation.hosts, ", ")),
+			})
+		}
+
+		group.candidates = append(group.candidates, ownership.Candidate{
+			Root:     observation.root,
+			Evidence: evidence,
+		})
+		group.byRoot[observation.root] = observation
+	}
+
+	for _, group := range groups {
+		decisions, err := e.judge.EvaluateCandidates(ctx, ownership.Request{
+			Scenario:   "reverse DNS pivot",
+			Seed:       group.seed,
+			Candidates: group.candidates,
+		})
+		if err != nil {
+			pCtx.Lock()
+			pCtx.Errors = append(pCtx.Errors, err)
+			pCtx.Unlock()
+			continue
+		}
+
+		for _, decision := range decisions {
+			observation, exists := group.byRoot[decision.Root]
+			if !exists {
+				continue
 			}
 
-			if pCtx.EnqueueSeed(newSeed) {
-				log.Printf("[IP Enricher] Found novel domain via PTR: %s. Scheduling another collection wave.", target)
+			seed := discovery.BuildDiscoveredSeed(observation.seed, decision.Root, "ptr-recursion")
+			if seed.CompanyName == "" {
+				seed.CompanyName = decision.Root
+			}
+
+			if pCtx.EnqueueSeedCandidate(seed, models.SeedEvidence{
+				Source:     "ownership_judge",
+				Kind:       decision.Kind,
+				Value:      decision.Root,
+				Confidence: decision.Confidence,
+				Reasoned:   true,
+			}) {
+				log.Printf("[IP Enricher] Promoted PTR-derived registrable domain %s into the next collection frontier.", decision.Root)
 			}
 		}
 	}
 
 	return pCtx, nil
+}
+
+func buildPTRSeed(parent models.Seed, host string) models.Seed {
+	host = discovery.NormalizeDomainIdentifier(host)
+	if host == "" {
+		return models.Seed{}
+	}
+
+	id := host
+	if parent.ID != "" {
+		id = parent.ID + ":ptr:" + host
+	}
+
+	tags := append([]string{}, parent.Tags...)
+	tags = append(tags, "ptr-recursion")
+
+	return models.Seed{
+		ID:          id,
+		CompanyName: host,
+		Domains:     []string{host},
+		Address:     parent.Address,
+		Industry:    parent.Industry,
+		Tags:        discovery.UniqueLowerStrings(tags),
+	}
 }
 
 func enrichIP(asset *models.Asset) {

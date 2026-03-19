@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"asset-discovery/internal/exportutil"
 	"asset-discovery/internal/models"
 )
 
@@ -94,15 +95,15 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 	}
 
 	rows := make([]models.VisualizerRow, 0, len(pCtx.Assets))
-	for _, asset := range sortedAssetsForExport(pCtx.Assets) {
+	for _, asset := range exportutil.SortedAssetsForExport(pCtx.Assets) {
 		enum := enumByID[asset.EnumerationID]
-		classified := classifyAsset(asset)
+		classified := exportutil.ClassifyAsset(asset)
 		rows = append(rows, models.VisualizerRow{
 			AssetID:           asset.ID,
 			Identifier:        asset.Identifier,
 			AssetType:         string(asset.Type),
-			DomainKind:        string(classified.domainKind),
-			RegistrableDomain: classified.registrableDomain,
+			DomainKind:        string(classified.DomainKind),
+			RegistrableDomain: classified.RegistrableDomain,
 			Source:            asset.Source,
 			EnumerationID:     asset.EnumerationID,
 			SeedID:            enum.SeedID,
@@ -140,16 +141,22 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 }
 
 func visualizerRowGroup(row models.VisualizerRow) int {
+	const (
+		groupRegistrableDomain = iota
+		groupSubdomain
+		groupIP
+	)
+
 	if row.AssetType == string(models.AssetTypeDomain) {
 		switch row.DomainKind {
 		case string(models.DomainKindRegistrable):
-			return exportGroupRegistrableDomain
+			return groupRegistrableDomain
 		case string(models.DomainKindSubdomain):
-			return exportGroupSubdomain
+			return groupSubdomain
 		}
 	}
 
-	return exportGroupIP
+	return groupIP
 }
 
 func buildVisualizerDetails(asset models.Asset) string {
