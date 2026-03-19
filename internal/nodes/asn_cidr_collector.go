@@ -173,6 +173,11 @@ func (c *ASNCIDRCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 		}
 
 		for _, decision := range decisions {
+			if !hasHighConfidenceOwnership(decision.Confidence) {
+				log.Printf("[ASN/CIDR Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
+				continue
+			}
+
 			newAssets = append(newAssets, models.Asset{
 				ID:            newNodeID("dom-asn-cidr-root"),
 				EnumerationID: enum.ID,

@@ -36,10 +36,11 @@ Exports separate registrable domains from discovered subdomains. JSON stays as a
 The ownership-style pivots can use LLM judges instead of hardcoded brand and evidence-weight heuristics:
 
 - `web_hint_collector` for external anchor-link roots found on the homepage
+- `crawler_collector` for outbound roots found while recursively crawling in-scope site pages
 - `reverse_registration_collector` for candidate domains discovered through CT and RDAP overlap
 - `asn_cidr_collector` and `ip_enricher` for PTR-derived registrable domains found from network pivots
 
-Deterministic parsing still extracts candidates from canonical tags, redirects, `security.txt`, and external anchors. Cross-root ownership collection now stays judge-gated instead of promoting those roots directly.
+Deterministic parsing still extracts candidates from canonical tags, redirects, `security.txt`, internal page crawls, and external anchors. Cross-root ownership collection now stays judge-gated instead of promoting those roots directly.
 
 Set these environment variables to enable the web-hint judge:
 
@@ -67,7 +68,7 @@ export ASSET_DISCOVERY_OWNERSHIP_LLM_BASE_URL="https://your-provider.example/v1"
 export ASSET_DISCOVERY_OWNERSHIP_LLM_ENDPOINT="https://your-provider.example/v1/chat/completions"
 ```
 
-Likewise, if `OPENAI_API_KEY` is set, the ownership judge now defaults to OpenAI's `gpt-5.4-nano` model and endpoint automatically. That enables the LLM-gated ownership pivots used by `reverse_registration_collector`, `asn_cidr_collector`, and `ip_enricher` without extra configuration.
+Likewise, if `OPENAI_API_KEY` is set, the ownership judge now defaults to OpenAI's `gpt-5.4-nano` model and endpoint automatically. That enables the LLM-gated ownership pivots used by `crawler_collector`, `reverse_registration_collector`, `asn_cidr_collector`, and `ip_enricher` without extra configuration.
 
 If either judge is not configured, its ownership decisions are skipped rather than falling back to hardcoded heuristics.
 

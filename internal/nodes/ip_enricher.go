@@ -100,8 +100,10 @@ func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) 
 			}
 
 			ptrObservationsMu.Lock()
-			if _, exists := ptrFollowUpSeeds[host]; !exists {
-				ptrFollowUpSeeds[host] = buildPTRSeed(enumToSeed[a.EnumerationID], host)
+			if ptrHostWithinSeedScope(enumToSeed[a.EnumerationID], host) {
+				if _, exists := ptrFollowUpSeeds[host]; !exists {
+					ptrFollowUpSeeds[host] = buildPTRSeed(enumToSeed[a.EnumerationID], host)
+				}
 			}
 
 			root := discovery.RegistrableDomain(host)
@@ -197,6 +199,11 @@ func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) 
 		}
 
 		for _, decision := range decisions {
+			if !hasHighConfidenceOwnership(decision.Confidence) {
+				log.Printf("[IP Enricher] Skipping PTR-derived registrable domain %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
+				continue
+			}
+
 			observation, exists := group.byRoot[decision.Root]
 			if !exists {
 				continue
@@ -244,6 +251,21 @@ func buildPTRSeed(parent models.Seed, host string) models.Seed {
 		Industry:    parent.Industry,
 		Tags:        discovery.UniqueLowerStrings(tags),
 	}
+}
+
+func ptrHostWithinSeedScope(seed models.Seed, host string) bool {
+	hostRoot := discovery.RegistrableDomain(host)
+	if hostRoot == "" {
+		return false
+	}
+
+	for _, domain := range seed.Domains {
+		if discovery.RegistrableDomain(domain) == hostRoot {
+			return true
+		}
+	}
+
+	return false
 }
 
 func enrichIP(asset *models.Asset) {

@@ -64,6 +64,7 @@ var rootCmd = &cobra.Command{
 				nodes.NewAlienVaultCollector(),
 				nodes.NewWaybackCollector(),
 				nodes.NewASNCIDRCollector(),
+				nodes.NewCrawlerCollector(),
 				nodes.NewWebHintCollector(),
 			},
 			Enrichers: []dag.Enricher{

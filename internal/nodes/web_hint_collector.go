@@ -155,6 +155,23 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 		}
 
 		for root, evidences := range signalsByRoot {
+			promoted := false
+			accepted := false
+			candidate := discovery.BuildDiscoveredSeed(seed, root, "web-hint-pivot")
+			for _, evidence := range evidences {
+				if !hasHighConfidenceOwnership(evidence.Confidence) {
+					log.Printf("[Web Hint Collector] Skipping %s due to low-confidence judge decision %.2f.", root, evidence.Confidence)
+					continue
+				}
+				accepted = true
+				if pCtx.EnqueueSeedCandidate(candidate, evidence) {
+					promoted = true
+				}
+			}
+			if !accepted {
+				continue
+			}
+
 			newAssets = append(newAssets, models.Asset{
 				ID:            newNodeID("dom-web-hint"),
 				EnumerationID: enum.ID,
@@ -164,14 +181,6 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				DiscoveryDate: time.Now(),
 				DomainDetails: &models.DomainDetails{},
 			})
-
-			promoted := false
-			candidate := discovery.BuildDiscoveredSeed(seed, root, "web-hint-pivot")
-			for _, evidence := range evidences {
-				if pCtx.EnqueueSeedCandidate(candidate, evidence) {
-					promoted = true
-				}
-			}
 
 			if promoted {
 				log.Printf("[Web Hint Collector] Promoted %s from web ownership hints.", root)

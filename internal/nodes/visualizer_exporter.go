@@ -309,6 +309,10 @@ func buildVisualizerTrace(asset models.Asset, classified exportutil.ClassifiedAs
 		trace.Sections = appendTraceSection(trace.Sections, "Enumeration", enumItems)
 	}
 
+	if len(contributors) > 1 {
+		trace.Sections = appendTraceSection(trace.Sections, "Seed Context", buildMergedSeedTraceItems(contributors, seedByID))
+	}
+
 	trace.Sections = appendTraceSection(trace.Sections, "Domain Evidence", buildDomainTraceItems(asset))
 	trace.Sections = appendTraceSection(trace.Sections, "Network Evidence", buildIPTraceItems(asset))
 	trace.Sections = appendTraceSection(trace.Sections, "Enrichment", buildEnrichmentTraceItems(asset.EnrichmentData))
@@ -383,6 +387,43 @@ func buildContributorTraceItems(contributors []models.VisualizerTraceContributor
 		}
 		items = append(items, strings.Join(parts, " | "))
 	}
+	return items
+}
+
+func buildMergedSeedTraceItems(contributors []models.VisualizerTraceContributor, seedByID map[string]models.Seed) []string {
+	items := make([]string, 0, len(contributors)*3)
+	seen := make(map[string]struct{}, len(contributors))
+
+	for _, contributor := range contributors {
+		seedID := strings.TrimSpace(contributor.SeedID)
+		if seedID == "" {
+			continue
+		}
+		if _, exists := seen[seedID]; exists {
+			continue
+		}
+		seen[seedID] = struct{}{}
+
+		seed := seedByID[seedID]
+		label := seedID
+		if seed.CompanyName != "" {
+			label += " (" + seed.CompanyName + ")"
+		}
+
+		items = append(items, "Seed "+label)
+		if len(seed.Domains) > 0 {
+			items = append(items, "Seed "+label+" | domains "+strings.Join(seed.Domains, ", "))
+		}
+		if len(seed.Tags) > 0 {
+			items = append(items, "Seed "+label+" | tags "+strings.Join(seed.Tags, ", "))
+		}
+		if evidence := formatSeedEvidence(seed.Evidence); len(evidence) > 0 {
+			for _, item := range evidence {
+				items = append(items, "Seed "+label+" | "+item)
+			}
+		}
+	}
+
 	return items
 }
 

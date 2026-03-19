@@ -278,6 +278,55 @@ func TestWebHintCollector_PromotesJudgeApprovedRedirect(t *testing.T) {
 	}
 }
 
+func TestWebHintCollector_SkipsLowConfidenceJudgeDecision(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`
+			<html>
+				<body>
+					<a href="https://example-low-confidence.com/about">About our group</a>
+				</body>
+			</html>
+		`))
+	}))
+	defer server.Close()
+
+	judge := &stubWebHintJudge{
+		hints: []webhint.Decision{
+			{
+				Root:       "example-low-confidence.com",
+				Kind:       "llm_link",
+				Confidence: 0.79,
+			},
+		},
+	}
+
+	collector := NewWebHintCollector()
+	collector.client = server.Client()
+	collector.judge = judge
+	collector.buildTargets = func(domain string) []webFetchTarget {
+		return []webFetchTarget{{URL: server.URL, Kind: "homepage"}}
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if assetExists(pCtx.Assets, "example-low-confidence.com") {
+		t.Fatalf("expected low-confidence web hint root to stay out of assets, got %+v", pCtx.Assets)
+	}
+	if seedExists(pCtx.Seeds, "example-low-confidence.com") {
+		t.Fatalf("expected low-confidence web hint root to stay out of seeds, got %+v", pCtx.Seeds)
+	}
+}
+
 func TestReverseRegistrationCollector_PromotesValidatedCandidate(t *testing.T) {
 	collector := NewReverseRegistrationCollector()
 	collector.judge = &stubOwnershipJudge{

@@ -204,6 +204,10 @@ func TestVisualizerExporter_TracePreservesMergedContributorLineage(t *testing.T)
 	if !traceSectionContains(trace.Sections, "Contributor Provenance", "enumeration enum-2") {
 		t.Fatalf("expected contributor provenance section to include enum-2, got %+v", trace.Sections)
 	}
+
+	if !traceSectionContains(trace.Sections, "Seed Context", "Evidence: ownership_judge | ownership_judged | example.com | confidence 0.93 | reasoned") {
+		t.Fatalf("expected merged trace to include seed evidence for contributor seeds, got %+v", trace.Sections)
+	}
 }
 
 func sampleVisualizerContext(seedID, enumerationID, assetID, identifier string, ts time.Time) *models.PipelineContext {
@@ -274,12 +278,18 @@ func sampleMergedVisualizerContext(ts time.Time) *models.PipelineContext {
 				ID:          "seed-1",
 				CompanyName: "Example Corp",
 				Domains:     []string{"example.com"},
+				Evidence: []models.SeedEvidence{
+					{Source: "manual", Kind: "company_name", Value: "Example Corp"},
+				},
 			},
 			{
 				ID:          "seed-2",
 				CompanyName: "Example Subsidiary",
 				Domains:     []string{"example.com"},
 				Tags:        []string{"subsidiary"},
+				Evidence: []models.SeedEvidence{
+					{Source: "ownership_judge", Kind: "ownership_judged", Value: "example.com", Confidence: 0.93, Reasoned: true},
+				},
 			},
 		},
 		Enumerations: []models.Enumeration{

@@ -217,6 +217,11 @@ func (c *ReverseRegistrationCollector) Process(ctx context.Context, pCtx *models
 		}
 
 		for _, decision := range decisions {
+			if !hasHighConfidenceOwnership(decision.Confidence) {
+				log.Printf("[Reverse Registration Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
+				continue
+			}
+
 			candidate, exists := candidateByRoot[decision.Root]
 			if !exists {
 				continue
