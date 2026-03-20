@@ -31,6 +31,12 @@ type Filter interface {
 	Node
 }
 
+// Reconsiderer re-evaluates discarded candidates after the normal collection
+// frontier has been exhausted.
+type Reconsiderer interface {
+	Node
+}
+
 // Exporter formats the final dataset for consumption.
 type Exporter interface {
 	Node
@@ -38,12 +44,13 @@ type Exporter interface {
 
 // Engine Orchestrates the Pipeline
 type Engine struct {
-	Collectors []Collector
-	Enrichers  []Enricher
-	Filters    []Filter
-	Exporters  []Exporter
-	RunID      string
-	Telemetry  telemetry.Provider
+	Collectors    []Collector
+	Enrichers     []Enricher
+	Reconsiderers []Reconsiderer
+	Filters       []Filter
+	Exporters     []Exporter
+	RunID         string
+	Telemetry     telemetry.Provider
 }
 
 // Allow initial seeds plus two discovered frontiers so roots found in the first
@@ -64,44 +71,31 @@ func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models
 	wave := 0
 
 	for {
-		// 1. Run Collectors (Concurrently)
-		if frontier := pCtx.CollectionSeeds(); len(frontier) > 0 {
-			waveCtx, waveSpan := telemetry.Start(
-				ctx,
-				"dag.wave",
-				telemetry.String("run_id", e.RunID),
-				telemetry.Int("wave", wave),
-				telemetry.Int("frontier_size", len(frontier)),
-			)
-			var wg sync.WaitGroup
-			for _, c := range e.Collectors {
-				wg.Add(1)
-				go func(col Collector) {
-					defer wg.Done()
-					err := e.processNode(waveCtx, "collect", wave, col, pCtx)
-					if err != nil {
-						pCtx.Lock()
-						pCtx.Errors = append(pCtx.Errors, err)
-						pCtx.Unlock()
-					}
-				}(c)
-			}
-			wg.Wait()
-			waveSpan.End()
-		}
-
-		// 2. Run Enrichers
-		for _, en := range e.Enrichers {
-			err := e.processNode(ctx, "enrich", wave, en, pCtx)
-			if err != nil {
-				return pCtx, err
-			}
+		if err := e.runWave(ctx, pCtx, wave); err != nil {
+			return pCtx, err
 		}
 
 		if !pCtx.AdvanceSeedFrontier() {
 			break
 		}
 		wave++
+	}
+
+	if len(e.Reconsiderers) > 0 {
+		pCtx.ReserveExtraCollectionWave()
+		for _, reconsiderer := range e.Reconsiderers {
+			err := e.processNode(ctx, "reconsider", wave, reconsiderer, pCtx)
+			if err != nil {
+				return pCtx, err
+			}
+		}
+
+		if pCtx.AdvanceSeedFrontier() {
+			wave++
+			if err := e.runWave(ctx, pCtx, wave); err != nil {
+				return pCtx, err
+			}
+		}
 	}
 
 	// 3. Run Filters
@@ -121,6 +115,42 @@ func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models
 	}
 
 	return pCtx, nil
+}
+
+func (e *Engine) runWave(ctx context.Context, pCtx *models.PipelineContext, wave int) error {
+	if frontier := pCtx.CollectionSeeds(); len(frontier) > 0 {
+		waveCtx, waveSpan := telemetry.Start(
+			ctx,
+			"dag.wave",
+			telemetry.String("run_id", e.RunID),
+			telemetry.Int("wave", wave),
+			telemetry.Int("frontier_size", len(frontier)),
+		)
+		var wg sync.WaitGroup
+		for _, c := range e.Collectors {
+			wg.Add(1)
+			go func(col Collector) {
+				defer wg.Done()
+				err := e.processNode(waveCtx, "collect", wave, col, pCtx)
+				if err != nil {
+					pCtx.Lock()
+					pCtx.Errors = append(pCtx.Errors, err)
+					pCtx.Unlock()
+				}
+			}(c)
+		}
+		wg.Wait()
+		waveSpan.End()
+	}
+
+	for _, en := range e.Enrichers {
+		err := e.processNode(ctx, "enrich", wave, en, pCtx)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (e *Engine) processNode(ctx context.Context, stage string, wave int, node Node, pCtx *models.PipelineContext) error {

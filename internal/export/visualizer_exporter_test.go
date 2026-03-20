@@ -230,6 +230,121 @@ func TestVisualizerExporter_TracePreservesMergedContributorLineage(t *testing.T)
 	}
 }
 
+func TestVisualizerExporter_PreservesReconsiderationJudgeGroupAndFinalWaveAssets(t *testing.T) {
+	htmlPath := filepath.Join(t.TempDir(), "visualizer.html")
+	ts := time.Date(2026, time.March, 18, 11, 0, 0, 0, time.FixedZone("-0300", -3*60*60))
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "Example Corp",
+				Domains:     []string{"example.com"},
+			},
+			{
+				ID:          "seed-1:example-store.com",
+				CompanyName: "Example Corp",
+				Domains:     []string{"example-store.com"},
+				Evidence: []models.SeedEvidence{
+					{Source: "post_run_reconsideration", Kind: "ownership_judged", Value: "example-store.com", Confidence: 0.94, Reasoned: true},
+				},
+			},
+		},
+		Enumerations: []models.Enumeration{
+			{
+				ID:        "enum-1",
+				SeedID:    "seed-1",
+				Status:    "running",
+				CreatedAt: ts.Add(-4 * time.Minute),
+			},
+			{
+				ID:        "enum-2",
+				SeedID:    "seed-1:example-store.com",
+				Status:    "running",
+				CreatedAt: ts.Add(-1 * time.Minute),
+			},
+		},
+		Assets: []models.Asset{
+			{
+				ID:            "asset-1",
+				EnumerationID: "enum-2",
+				Type:          models.AssetTypeDomain,
+				Identifier:    "portal.example-store.com",
+				Source:        "crawler_collector",
+				DiscoveryDate: ts,
+				DomainDetails: &models.DomainDetails{},
+			},
+		},
+		JudgeEvaluations: []models.JudgeEvaluation{
+			{
+				Collector:   "web_hint_collector",
+				SeedID:      "seed-1",
+				SeedLabel:   "Example Corp",
+				SeedDomains: []string{"example.com"},
+				Scenario:    "web ownership hints from example.com",
+				Outcomes: []models.JudgeCandidateOutcome{
+					{
+						Root:       "example-store.com",
+						Collect:    false,
+						Explicit:   true,
+						Confidence: 0.88,
+						Reason:     "Homepage evidence alone was too weak.",
+						Support:    []string{"https://example-store.com/ [store]"},
+					},
+				},
+			},
+			{
+				Collector:   "run_reconsideration",
+				SeedID:      "seed-1",
+				SeedLabel:   "Example Corp",
+				SeedDomains: []string{"example.com"},
+				Scenario:    "post-run discarded candidate reconsideration",
+				Outcomes: []models.JudgeCandidateOutcome{
+					{
+						Root:       "example-store.com",
+						Collect:    true,
+						Explicit:   true,
+						Confidence: 0.94,
+						Kind:       "ownership_judged",
+						Reason:     "The completed run already contains first-party assets under this root.",
+						Support:    []string{"Current run already discovered portal.example-store.com"},
+					},
+				},
+			},
+		},
+	}
+
+	exporter := NewVisualizerExporter(htmlPath, "run-reconsidered", Downloads{})
+	exporter.now = func() time.Time { return ts.Add(3 * time.Minute) }
+
+	if _, err := exporter.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected visualizer export to succeed, got %v", err)
+	}
+
+	snapshotPath := filepath.Join(strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)), "runs", "run-reconsidered.json")
+	snapshotData, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("expected reconsidered snapshot to be readable, got %v", err)
+	}
+
+	var snapshot Run
+	if err := json.Unmarshal(snapshotData, &snapshot); err != nil {
+		t.Fatalf("expected reconsidered snapshot JSON to parse, got %v", err)
+	}
+
+	if !snapshotHasRow(snapshot.Rows, "portal.example-store.com") {
+		t.Fatalf("expected final-wave asset to be present in the same run output, got %+v", snapshot.Rows)
+	}
+
+	group := findJudgeGroup(snapshot.JudgeSummary, "run_reconsideration", "post-run discarded candidate reconsideration")
+	if group == nil {
+		t.Fatalf("expected reconsideration judge group to be present, got %+v", snapshot.JudgeSummary)
+	}
+	if len(group.Accepted) != 1 || group.Accepted[0].Root != "example-store.com" {
+		t.Fatalf("expected reconsidered candidate to appear as accepted, got %+v", group.Accepted)
+	}
+}
+
 func sampleVisualizerContext(seedID, enumerationID, assetID, identifier string, ts time.Time) *models.PipelineContext {
 	return &models.PipelineContext{
 		Seeds: []models.Seed{
@@ -450,4 +565,25 @@ func snapshotHasJudgeCandidate(summary *lineage.JudgeSummary, root string, accep
 		}
 	}
 	return false
+}
+
+func snapshotHasRow(rows []Row, identifier string) bool {
+	for _, row := range rows {
+		if row.Identifier == identifier {
+			return true
+		}
+	}
+	return false
+}
+
+func findJudgeGroup(summary *lineage.JudgeSummary, collector, scenario string) *lineage.JudgeGroup {
+	if summary == nil {
+		return nil
+	}
+	for i := range summary.Groups {
+		if summary.Groups[i].Collector == collector && summary.Groups[i].Scenario == scenario {
+			return &summary.Groups[i]
+		}
+	}
+	return nil
 }

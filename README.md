@@ -12,6 +12,8 @@ This project implements a Directed Acyclic Graph (DAG) for processing asset disc
 
 If enrichment discovers new seeds, the engine can schedule a later follow-up collection wave using only that new frontier. This preserves acyclic stage execution inside each wave while still expanding coverage across public asset pivots.
 
+Once the normal collection/enrichment frontier is exhausted, the engine now also performs one automatic post-run reconsideration pass over discarded judge candidates. If that reconsideration promotes any roots, the scheduler opens exactly one extra frontier for those promoted seeds and then continues to filtering/exporting. If the aggregated reconsideration prompt exceeds the internal size budget, the pass is skipped as a non-fatal step.
+
 ## Usage
 
 Currently, the entrypoint is a local CLI.
@@ -41,6 +43,8 @@ The ownership-style pivots can use LLM judges instead of hardcoded brand and evi
 - `asn_cidr_collector` and `ip_enricher` for PTR-derived registrable domains found from network pivots
 
 Deterministic parsing still extracts candidates from canonical tags, redirects, `security.txt`, internal page crawls, and external anchors. Cross-root ownership collection now stays judge-gated instead of promoting those roots directly.
+
+When the ownership judge is enabled, the same configuration is also reused for the automatic post-run reconsideration pass. There is no separate CLI flag for this in v1.
 
 Set these environment variables to enable the web-hint judge:
 

@@ -149,12 +149,14 @@ type PipelineContext struct {
 	Errors           []error
 	JudgeEvaluations []JudgeEvaluation
 
-	collectionSeeds    []Seed
-	pendingSeeds       []Seed
-	knownSeedKeys      map[string]struct{}
-	candidateSeeds     map[string]*seedCandidate
-	collectionDepth    int
-	maxCollectionDepth int
+	collectionSeeds               []Seed
+	pendingSeeds                  []Seed
+	knownSeedKeys                 map[string]struct{}
+	candidateSeeds                map[string]*seedCandidate
+	collectionDepth               int
+	maxCollectionDepth            int
+	extraCollectionWaveReserved   bool
+	extraCollectionWaveInProgress bool
 }
 
 type seedCandidate struct {
@@ -188,6 +190,8 @@ func (p *PipelineContext) InitializeSeedFrontier(maxDepth int) {
 	p.collectionDepth = 0
 	p.pendingSeeds = nil
 	p.collectionSeeds = nil
+	p.extraCollectionWaveReserved = false
+	p.extraCollectionWaveInProgress = false
 	p.knownSeedKeys = make(map[string]struct{}, len(p.Seeds))
 	p.candidateSeeds = make(map[string]*seedCandidate)
 
@@ -223,12 +227,27 @@ func (p *PipelineContext) CollectionSeeds() []Seed {
 	return append([]Seed(nil), p.collectionSeeds...)
 }
 
+// ReserveExtraCollectionWave allows one scheduler-owned collection wave after
+// the normal collection depth has been exhausted.
+func (p *PipelineContext) ReserveExtraCollectionWave() bool {
+	p.Lock()
+	defer p.Unlock()
+
+	if p.extraCollectionWaveReserved || p.extraCollectionWaveInProgress {
+		return false
+	}
+
+	p.extraCollectionWaveReserved = true
+	return true
+}
+
 // EnqueueSeed schedules a newly discovered seed for the next collection wave.
 func (p *PipelineContext) EnqueueSeed(seed Seed) bool {
 	p.Lock()
 	defer p.Unlock()
 
-	if p.collectionDepth >= p.maxCollectionDepth {
+	mode := p.seedSchedulingModeLocked()
+	if mode == seedSchedulingReject {
 		return false
 	}
 
@@ -242,9 +261,12 @@ func (p *PipelineContext) EnqueueSeed(seed Seed) bool {
 	delete(p.candidateSeeds, key)
 	p.knownSeedKeys[key] = struct{}{}
 	p.Seeds = append(p.Seeds, seed)
-	p.pendingSeeds = append(p.pendingSeeds, seed)
+	if mode == seedSchedulingNextWave {
+		p.pendingSeeds = append(p.pendingSeeds, seed)
+		return true
+	}
 
-	return true
+	return false
 }
 
 // EnqueueSeedCandidate records evidence for an auto-discovered seed and promotes it once
@@ -253,7 +275,8 @@ func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence)
 	p.Lock()
 	defer p.Unlock()
 
-	if p.collectionDepth >= p.maxCollectionDepth {
+	mode := p.seedSchedulingModeLocked()
+	if mode == seedSchedulingReject {
 		return false
 	}
 
@@ -303,20 +326,16 @@ func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence)
 		candidate.reasoned = true
 	}
 
+	if mode == seedSchedulingRegisterOnly && !shouldPromoteSeedCandidate(candidate) {
+		p.materializeSeedCandidateLocked(key, candidate, false)
+		return false
+	}
+
 	if !shouldPromoteSeedCandidate(candidate) {
 		return false
 	}
 
-	promoted := candidate.seed
-	promoted.Confidence = candidate.maxConfidence
-	promoted.Evidence = append([]SeedEvidence(nil), candidate.evidence...)
-
-	delete(p.candidateSeeds, key)
-	p.knownSeedKeys[key] = struct{}{}
-	p.Seeds = append(p.Seeds, promoted)
-	p.pendingSeeds = append(p.pendingSeeds, promoted)
-
-	return true
+	return p.materializeSeedCandidateLocked(key, candidate, mode == seedSchedulingNextWave)
 }
 
 // AdvanceSeedFrontier moves newly discovered seeds into the next collection wave.
@@ -325,6 +344,23 @@ func (p *PipelineContext) AdvanceSeedFrontier() bool {
 	defer p.Unlock()
 
 	if len(p.pendingSeeds) == 0 {
+		if p.extraCollectionWaveReserved && !p.extraCollectionWaveInProgress {
+			p.extraCollectionWaveReserved = false
+		}
+		p.collectionSeeds = nil
+		return false
+	}
+
+	if p.extraCollectionWaveReserved && !p.extraCollectionWaveInProgress {
+		p.extraCollectionWaveReserved = false
+		p.extraCollectionWaveInProgress = true
+		p.collectionSeeds = append([]Seed(nil), p.pendingSeeds...)
+		p.pendingSeeds = nil
+		return true
+	}
+
+	if p.extraCollectionWaveInProgress {
+		p.pendingSeeds = nil
 		p.collectionSeeds = nil
 		return false
 	}
@@ -393,6 +429,27 @@ func seedKey(seed Seed) string {
 	}
 
 	return strings.TrimSpace(seed.ID)
+}
+
+type seedSchedulingMode int
+
+const (
+	seedSchedulingReject seedSchedulingMode = iota
+	seedSchedulingNextWave
+	seedSchedulingRegisterOnly
+)
+
+func (p *PipelineContext) seedSchedulingModeLocked() seedSchedulingMode {
+	switch {
+	case p.extraCollectionWaveInProgress:
+		return seedSchedulingRegisterOnly
+	case p.extraCollectionWaveReserved:
+		return seedSchedulingNextWave
+	case p.collectionDepth < p.maxCollectionDepth:
+		return seedSchedulingNextWave
+	default:
+		return seedSchedulingReject
+	}
 }
 
 func shouldPromoteSeedCandidate(candidate *seedCandidate) bool {
@@ -485,6 +542,26 @@ func (p *PipelineContext) mergeSeedAcrossSlicesLocked(seed Seed, evidence ...See
 			candidate.reasoned = true
 		}
 	}
+}
+
+func (p *PipelineContext) materializeSeedCandidateLocked(key string, candidate *seedCandidate, schedule bool) bool {
+	if candidate == nil {
+		return false
+	}
+
+	promoted := candidate.seed
+	promoted.Confidence = candidate.maxConfidence
+	promoted.Evidence = append([]SeedEvidence(nil), candidate.evidence...)
+
+	delete(p.candidateSeeds, key)
+	p.knownSeedKeys[key] = struct{}{}
+	p.Seeds = append(p.Seeds, promoted)
+	if schedule {
+		p.pendingSeeds = append(p.pendingSeeds, promoted)
+		return true
+	}
+
+	return false
 }
 
 func (p *PipelineContext) mergeSeedIntoSlice(seeds []Seed, key string, incoming Seed, evidence ...SeedEvidence) {

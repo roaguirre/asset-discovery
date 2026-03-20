@@ -188,6 +188,105 @@ func TestEngine_Run_CollectsLateDiscoveredFollowUpSeed(t *testing.T) {
 	}
 }
 
+type extraFrontierEnricher struct {
+	callCount int
+}
+
+func (e *extraFrontierEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	e.callCount++
+	if e.callCount == 2 {
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-3",
+			CompanyName: "extra.example.net",
+			Domains:     []string{"extra.example.net"},
+		})
+	}
+	return pCtx, nil
+}
+
+type promotingReconsiderer struct {
+	callCount int
+}
+
+func (r *promotingReconsiderer) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	r.callCount++
+	if r.callCount == 1 {
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-2",
+			CompanyName: "promoted.example.com",
+			Domains:     []string{"promoted.example.com"},
+		})
+	}
+	return pCtx, nil
+}
+
+func TestEngine_Run_ReconsiderationPromotesOneBoundedExtraFrontier(t *testing.T) {
+	collector := &frontierCollector{}
+	enricher := &extraFrontierEnricher{}
+	reconsiderer := &promotingReconsiderer{}
+
+	engine := &dag.Engine{
+		Collectors:    []dag.Collector{collector},
+		Enrichers:     []dag.Enricher{enricher},
+		Reconsiderers: []dag.Reconsiderer{reconsiderer},
+	}
+
+	resultCtx, err := engine.Run(context.Background(), &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	expectedSeedsPerCall := []int{1, 1}
+	if !reflect.DeepEqual(collector.seedsPerCall, expectedSeedsPerCall) {
+		t.Fatalf("expected collector frontier sizes %v, got %v", expectedSeedsPerCall, collector.seedsPerCall)
+	}
+	if reconsiderer.callCount != 1 {
+		t.Fatalf("expected reconsiderer to run once, got %d calls", reconsiderer.callCount)
+	}
+	if len(resultCtx.Seeds) != 3 {
+		t.Fatalf("expected extra-frontier discovery to be registered without a third wave, got %d seeds", len(resultCtx.Seeds))
+	}
+}
+
+func TestEngine_Run_DoesNotReconsiderAgainAfterExtraFrontier(t *testing.T) {
+	collector := &frontierCollector{}
+	enricher := &extraFrontierEnricher{}
+	reconsiderer := &promotingReconsiderer{}
+
+	engine := &dag.Engine{
+		Collectors:    []dag.Collector{collector},
+		Enrichers:     []dag.Enricher{enricher},
+		Reconsiderers: []dag.Reconsiderer{reconsiderer},
+	}
+
+	if _, err := engine.Run(context.Background(), &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if reconsiderer.callCount != 1 {
+		t.Fatalf("expected reconsiderer to run exactly once, got %d calls", reconsiderer.callCount)
+	}
+	if !reflect.DeepEqual(collector.seedsPerCall, []int{1, 1}) {
+		t.Fatalf("expected no third collector wave after the extra frontier, got %v", collector.seedsPerCall)
+	}
+}
+
 type recordedSpan struct {
 	name  string
 	attrs map[string]interface{}

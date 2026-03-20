@@ -25,12 +25,15 @@ graph TD
     A[Active Seed Frontier] --> B(Collection Node)
     B --> C(Enrichment Node)
     C --> D{Scheduler}
-    D -->|Current wave complete| E(Filtering Node)
-    E --> F(Exporting Node)
-    F --> G[Final Assets Output]
+    D -->|Promoted discarded roots queued| E[Scheduler-owned Final Frontier Queue]
+    D -->|No more seeds| F(Filtering Node)
+    F --> G(Exporting Node)
+    G --> H[Final Assets Output]
 ```
 
 If enrichment discovers new seeds, the scheduler creates a later collection wave that starts again from a new active frontier. That later wave is scheduler behavior, not another edge inside the current DAG.
+
+After the normal frontier is exhausted, the scheduler may run one bounded reconsideration pass over discarded judge candidates using the full run context gathered so far. If that pass promotes any candidates, it creates exactly one final frontier. Seeds discovered during that final frontier are registered for traceability but do not open another follow-up wave.
 
 ## Data Models
 

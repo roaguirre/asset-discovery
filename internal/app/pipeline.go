@@ -15,6 +15,7 @@ import (
 	"asset-discovery/internal/filter"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/ownership"
+	"asset-discovery/internal/reconsider"
 	"asset-discovery/internal/tracing/telemetry"
 	"asset-discovery/internal/webhint"
 )
@@ -97,6 +98,11 @@ func NewPipeline(cfg Config) *Pipeline {
 		Enrichers: []dag.Enricher{
 			enrich.NewDNSResolverEnricher(),
 			enrich.NewIPEnricher(enrich.WithIPEnricherJudge(ownershipJudge)),
+		},
+		Reconsiderers: []dag.Reconsiderer{
+			reconsider.NewDiscardedCandidateReconsiderer(
+				reconsider.WithDiscardedCandidateReconsidererJudge(ownershipJudge),
+			),
 		},
 		Filters: []dag.Filter{
 			filter.NewMergeFilter(),

@@ -274,6 +274,10 @@ func parseLLMDecisions(raw string) (map[string]llmDecision, error) {
 	return decisions, nil
 }
 
+func EstimatePromptSize(request Request) int {
+	return len(judgeSystemPrompt) + len(buildJudgePrompt(request))
+}
+
 func buildJudgePrompt(request Request) string {
 	payload := struct {
 		Scenario   string      `json:"scenario"`
