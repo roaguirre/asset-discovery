@@ -110,6 +110,82 @@ func TestCrawlerCollector_RecursivelyFollowsInScopePagesAndPromotesJudgedOutboun
 	}
 }
 
+func TestCrawlerCollector_JudgesOverflowCandidatesInBatches(t *testing.T) {
+	collector := NewCrawlerCollector()
+	collector.maxDepth = 1
+	collector.maxPagesPerSeed = 1
+
+	targetRoot := "zz-owned-example.com"
+	collector.judge = &stubOwnershipJudge{
+		decisions: []ownership.Decision{
+			{
+				Root:       targetRoot,
+				Kind:       "ownership_judged",
+				Confidence: 0.96,
+			},
+		},
+	}
+	collector.buildStartURLs = func(domain string) []string {
+		return []string{"https://example.com/"}
+	}
+
+	links := make([]models.CrawlLink, 0, maxCrawlerJudgeBatchSize+1)
+	for i := 0; i < maxCrawlerJudgeBatchSize; i++ {
+		root := fmt.Sprintf("candidate-%02d-example.com", i)
+		links = append(links, models.CrawlLink{
+			SourceURL:  "https://example.com/",
+			TargetURL:  "https://www." + root + "/",
+			TargetHost: "www." + root,
+			TargetRoot: root,
+			Relation:   "anchor",
+		})
+	}
+	links = append(links, models.CrawlLink{
+		SourceURL:  "https://example.com/",
+		TargetURL:  "https://www." + targetRoot + "/",
+		TargetHost: "www." + targetRoot,
+		TargetRoot: targetRoot,
+		Relation:   "anchor",
+	})
+
+	collector.fetchPage = func(ctx context.Context, target crawlerQueueItem) (*models.CrawlPage, error) {
+		return &models.CrawlPage{
+			URL:      target.URL,
+			FinalURL: target.URL,
+			Links:    append([]models.CrawlLink(nil), links...),
+		}, nil
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if !assetExists(pCtx.Assets, targetRoot) {
+		t.Fatalf("expected overflow candidate to be judged and added as an asset, got %+v", pCtx.Assets)
+	}
+	if !seedExists(pCtx.Seeds, targetRoot) {
+		t.Fatalf("expected overflow candidate to be promoted into seeds, got %+v", pCtx.Seeds)
+	}
+
+	judge, _ := collector.judge.(*stubOwnershipJudge)
+	if judge == nil || len(judge.seen) != 2 {
+		t.Fatalf("expected two batched ownership-judge requests, got %+v", judge)
+	}
+	if len(judge.seen[0].Candidates) != maxCrawlerJudgeBatchSize {
+		t.Fatalf("expected first batch to contain %d candidates, got %+v", maxCrawlerJudgeBatchSize, judge.seen[0].Candidates)
+	}
+	if len(judge.seen[1].Candidates) != 1 || judge.seen[1].Candidates[0].Root != targetRoot {
+		t.Fatalf("expected second batch to contain only %s, got %+v", targetRoot, judge.seen[1].Candidates)
+	}
+}
+
 func TestCrawlerCollector_DoesNotSurfaceUnapprovedOutboundRoot(t *testing.T) {
 	collector := NewCrawlerCollector()
 	collector.maxDepth = 1

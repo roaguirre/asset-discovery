@@ -82,9 +82,39 @@ type VisualizerTrace struct {
 	Related           []VisualizerTraceLink        `json:"related,omitempty"`
 }
 
+// VisualizerJudgeCandidate summarizes one accepted or discarded judge outcome.
+type VisualizerJudgeCandidate struct {
+	Root       string   `json:"root"`
+	Confidence float64  `json:"confidence,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	Explicit   bool     `json:"explicit,omitempty"`
+	Support    []string `json:"support,omitempty"`
+}
+
+// VisualizerJudgeGroup groups run-level judge analysis by collector and seed.
+type VisualizerJudgeGroup struct {
+	Collector   string                     `json:"collector"`
+	SeedID      string                     `json:"seed_id,omitempty"`
+	SeedLabel   string                     `json:"seed_label,omitempty"`
+	SeedDomains []string                   `json:"seed_domains,omitempty"`
+	Scenario    string                     `json:"scenario,omitempty"`
+	Accepted    []VisualizerJudgeCandidate `json:"accepted,omitempty"`
+	Discarded   []VisualizerJudgeCandidate `json:"discarded,omitempty"`
+}
+
+// VisualizerJudgeSummary stores accepted-vs-discarded judge analysis for a run.
+type VisualizerJudgeSummary struct {
+	EvaluationCount int                    `json:"evaluation_count"`
+	AcceptedCount   int                    `json:"accepted_count"`
+	DiscardedCount  int                    `json:"discarded_count"`
+	Groups          []VisualizerJudgeGroup `json:"groups,omitempty"`
+}
+
 // VisualizerRun stores the full dataset for a single visualizer snapshot.
 type VisualizerRun struct {
 	VisualizerRunSummary
-	Rows   []VisualizerRow   `json:"rows"`
-	Traces []VisualizerTrace `json:"traces,omitempty"`
+	Rows         []VisualizerRow         `json:"rows"`
+	Traces       []VisualizerTrace       `json:"traces,omitempty"`
+	JudgeSummary *VisualizerJudgeSummary `json:"judge_summary,omitempty"`
 }

@@ -44,8 +44,11 @@ type LinkSample struct {
 
 type Decision struct {
 	Root       string
+	Collect    bool
 	Kind       string
 	Confidence float64
+	Reason     string
+	Explicit   bool
 }
 
 type llmJudge struct {
@@ -211,22 +214,22 @@ func (j *llmJudge) EvaluateAnchorRoots(ctx context.Context, seed models.Seed, ba
 		return nil, err
 	}
 
-	decisions := make([]Decision, 0, len(decisionByRoot))
+	decisions := make([]Decision, 0, len(candidates))
 	for _, candidate := range candidates {
 		decision, exists := decisionByRoot[candidate.Root]
-		if !exists || !decision.Collect {
-			continue
-		}
 
 		kind := strings.TrimSpace(strings.ToLower(decision.Kind))
-		if kind == "" {
+		if decision.Collect && kind == "" {
 			kind = defaultLLMKind
 		}
 
 		decisions = append(decisions, Decision{
 			Root:       candidate.Root,
+			Collect:    exists && decision.Collect,
 			Kind:       kind,
 			Confidence: clampUnitFloat(decision.Confidence),
+			Reason:     strings.TrimSpace(decision.Reason),
+			Explicit:   exists,
 		})
 	}
 

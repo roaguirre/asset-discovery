@@ -50,8 +50,11 @@ type EvidenceItem struct {
 
 type Decision struct {
 	Root       string
+	Collect    bool
 	Kind       string
 	Confidence float64
+	Reason     string
+	Explicit   bool
 }
 
 type llmJudge struct {
@@ -217,22 +220,22 @@ func (j *llmJudge) EvaluateCandidates(ctx context.Context, request Request) ([]D
 		return nil, err
 	}
 
-	decisions := make([]Decision, 0, len(decisionByRoot))
+	decisions := make([]Decision, 0, len(request.Candidates))
 	for _, candidate := range request.Candidates {
 		decision, exists := decisionByRoot[candidate.Root]
-		if !exists || !decision.Collect {
-			continue
-		}
 
 		kind := strings.TrimSpace(strings.ToLower(decision.Kind))
-		if kind == "" {
+		if decision.Collect && kind == "" {
 			kind = defaultDecisionKind
 		}
 
 		decisions = append(decisions, Decision{
 			Root:       candidate.Root,
+			Collect:    exists && decision.Collect,
 			Kind:       kind,
 			Confidence: clampUnitFloat(decision.Confidence),
+			Reason:     strings.TrimSpace(decision.Reason),
+			Explicit:   exists,
 		})
 	}
 

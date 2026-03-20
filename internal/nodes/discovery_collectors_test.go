@@ -421,6 +421,46 @@ func TestReverseRegistrationCollector_SkipsUnvalidatedCandidate(t *testing.T) {
 	}
 }
 
+func TestReverseRegistrationCollector_DoesNotTreatCollapsedOrganizationNamesAsValidation(t *testing.T) {
+	collector := NewReverseRegistrationCollector()
+	judge := &stubOwnershipJudge{}
+	collector.judge = judge
+	collector.searchCT = func(ctx context.Context, term string) ([]string, error) {
+		return []string{"portal.example-holdings.com"}, nil
+	}
+	collector.lookupDomain = func(ctx context.Context, domain string) (*models.RDAPData, error) {
+		switch domain {
+		case "example.com":
+			return &models.RDAPData{
+				RegistrantOrg: "Example Group",
+				NameServers:   []string{"ns1.example-dns.com"},
+			}, nil
+		case "example-holdings.com":
+			return &models.RDAPData{
+				RegistrantOrg: "Example Holdings",
+				NameServers:   []string{"ns1.shared-hosting.net"},
+			}, nil
+		default:
+			return nil, nil
+		}
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Group", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if len(judge.seen) != 0 {
+		t.Fatalf("expected distinct legal names to be filtered before judge evaluation, got %+v", judge.seen)
+	}
+}
+
 func TestHackerTargetCollector_RejectsQuotaMessage(t *testing.T) {
 	collector := NewHackerTargetCollector()
 	collector.client = &http.Client{
@@ -528,7 +568,47 @@ type stubWebHintJudge struct {
 
 func (s *stubWebHintJudge) EvaluateAnchorRoots(ctx context.Context, seed models.Seed, baseDomain string, candidates []webhint.Candidate) ([]webhint.Decision, error) {
 	s.seen = append([]webhint.Candidate(nil), candidates...)
-	return append([]webhint.Decision(nil), s.hints...), s.err
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	decisionByRoot := make(map[string]webhint.Decision, len(s.hints))
+	for _, decision := range s.hints {
+		root := strings.TrimSpace(strings.ToLower(decision.Root))
+		if root == "" {
+			continue
+		}
+		if !decision.Collect && !decision.Explicit && (decision.Kind != "" || decision.Confidence > 0 || decision.Reason != "") {
+			decision.Collect = true
+		}
+		if !decision.Explicit {
+			decision.Explicit = true
+		}
+		decision.Root = root
+		decisionByRoot[root] = decision
+	}
+
+	decisions := make([]webhint.Decision, 0, len(candidates))
+	seenRoots := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		root := strings.TrimSpace(strings.ToLower(candidate.Root))
+		if root == "" {
+			continue
+		}
+		if _, exists := seenRoots[root]; exists {
+			continue
+		}
+		seenRoots[root] = struct{}{}
+
+		decision, exists := decisionByRoot[root]
+		if !exists {
+			decisions = append(decisions, webhint.Decision{Root: root})
+			continue
+		}
+		decisions = append(decisions, decision)
+	}
+
+	return decisions, nil
 }
 
 type stubOwnershipJudge struct {
@@ -539,7 +619,47 @@ type stubOwnershipJudge struct {
 
 func (s *stubOwnershipJudge) EvaluateCandidates(ctx context.Context, request ownership.Request) ([]ownership.Decision, error) {
 	s.seen = append(s.seen, request)
-	return append([]ownership.Decision(nil), s.decisions...), s.err
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	decisionByRoot := make(map[string]ownership.Decision, len(s.decisions))
+	for _, decision := range s.decisions {
+		root := strings.TrimSpace(strings.ToLower(decision.Root))
+		if root == "" {
+			continue
+		}
+		if !decision.Collect && !decision.Explicit && (decision.Kind != "" || decision.Confidence > 0 || decision.Reason != "") {
+			decision.Collect = true
+		}
+		if !decision.Explicit {
+			decision.Explicit = true
+		}
+		decision.Root = root
+		decisionByRoot[root] = decision
+	}
+
+	decisions := make([]ownership.Decision, 0, len(request.Candidates))
+	seenRoots := make(map[string]struct{}, len(request.Candidates))
+	for _, candidate := range request.Candidates {
+		root := strings.TrimSpace(strings.ToLower(candidate.Root))
+		if root == "" {
+			continue
+		}
+		if _, exists := seenRoots[root]; exists {
+			continue
+		}
+		seenRoots[root] = struct{}{}
+
+		decision, exists := decisionByRoot[root]
+		if !exists {
+			decisions = append(decisions, ownership.Decision{Root: root})
+			continue
+		}
+		decisions = append(decisions, decision)
+	}
+
+	return decisions, nil
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

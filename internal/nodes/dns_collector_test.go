@@ -218,6 +218,46 @@ func TestDNSCollector_DoesNotJudgeRecordReferenceWithoutOverlap(t *testing.T) {
 	}
 }
 
+func TestDNSCollector_DoesNotTreatCollapsedOrganizationNamesAsCorroboration(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+	resolver.ips["example.com"] = []string{"203.0.113.10"}
+	resolver.txt["example.com"] = []string{`v=spf1 include:spf.example-holdings.com`}
+
+	resolver.ips["example-holdings.com"] = []string{"198.51.100.50"}
+	resolver.ns["example-holdings.com"] = []string{"ns1.shared-hosting.net"}
+	resolver.rdap["example.com"] = &models.RDAPData{RegistrantOrg: "Example Group"}
+	resolver.rdap["example-holdings.com"] = &models.RDAPData{RegistrantOrg: "Example Holdings"}
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.maxVariantProbesPerRoot = 0
+	collector.judge = &stubOwnershipJudge{}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Group", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	judge, _ := collector.judge.(*stubOwnershipJudge)
+	if judge == nil {
+		t.Fatalf("expected stub judge")
+	}
+	if len(judge.seen) != 0 {
+		t.Fatalf("expected distinct legal names to stay below judge threshold, got %+v", judge.seen)
+	}
+}
+
 func TestDNSCollector_RecordsExactLookupErrors(t *testing.T) {
 	collector := NewDNSCollector()
 	resolver := newDNSCollectorTestResolver()

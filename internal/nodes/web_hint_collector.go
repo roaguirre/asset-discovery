@@ -142,7 +142,11 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 			if err != nil {
 				newErrors = append(newErrors, err)
 			} else {
+				recordWebHintJudgeEvaluation(pCtx, "web_hint_collector", seed, judgeBaseDomain, candidates, decisions)
 				for _, decision := range decisions {
+					if !decision.Collect {
+						continue
+					}
 					signalsByRoot[decision.Root] = append(signalsByRoot[decision.Root], models.SeedEvidence{
 						Source:     "web_hint_collector",
 						Kind:       decision.Kind,

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/publicsuffix"
 
@@ -13,13 +14,6 @@ import (
 )
 
 var domainPattern = regexp.MustCompile(`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
-
-var companyStopWords = map[string]struct{}{
-	"and": {}, "cl": {}, "co": {}, "company": {}, "corp": {}, "corporation": {}, "de": {}, "el": {}, "for": {},
-	"foundation": {}, "group": {}, "holding": {}, "holdings": {}, "inc": {}, "international": {}, "la": {},
-	"limitada": {}, "limited": {}, "llc": {}, "ltda": {}, "net": {}, "sa": {}, "services": {}, "solutions": {},
-	"spa": {}, "systems": {}, "tech": {}, "the": {},
-}
 
 func NormalizeDomainIdentifier(identifier string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(identifier), "."))
@@ -143,20 +137,32 @@ func ExtractDomainCandidates(raw string) []string {
 	return unique
 }
 
+// NormalizeOrganization canonicalizes casing and punctuation for exact
+// organization-name comparisons. It intentionally preserves all tokens so
+// ownership evidence does not collapse distinct legal names into the same key.
 func NormalizeOrganization(raw string) string {
-	tokens := make([]string, 0)
-	raw = strings.ToLower(raw)
-	raw = strings.NewReplacer("&", " ", "/", " ", "-", " ", "_", " ", ".", " ", ",", " ").Replace(raw)
-	for _, token := range strings.Fields(raw) {
-		if len(token) < 3 {
-			continue
-		}
-		if _, skip := companyStopWords[token]; skip {
-			continue
-		}
-		tokens = append(tokens, token)
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
 	}
-	return strings.Join(tokens, " ")
+
+	var builder strings.Builder
+	builder.Grow(len(raw))
+
+	lastSpace := true
+	for _, r := range raw {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			builder.WriteRune(r)
+			lastSpace = false
+			continue
+		}
+		if !lastSpace {
+			builder.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+
+	return strings.TrimSpace(builder.String())
 }
 
 func FirstNonEmpty(values ...string) string {

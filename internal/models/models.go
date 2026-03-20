@@ -35,6 +35,29 @@ type SeedEvidence struct {
 	Reasoned   bool    `json:"reasoned,omitempty"`
 }
 
+// JudgeCandidateOutcome records the outcome of one ownership or web-hint judge
+// candidate evaluation during a pipeline run.
+type JudgeCandidateOutcome struct {
+	Root       string   `json:"root"`
+	Collect    bool     `json:"collect"`
+	Confidence float64  `json:"confidence,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	Explicit   bool     `json:"explicit,omitempty"`
+	Support    []string `json:"support,omitempty"`
+}
+
+// JudgeEvaluation stores one judge request and all candidate outcomes so the
+// visualizer can explain what was accepted and what was discarded for a run.
+type JudgeEvaluation struct {
+	Collector   string                  `json:"collector"`
+	SeedID      string                  `json:"seed_id,omitempty"`
+	SeedLabel   string                  `json:"seed_label,omitempty"`
+	SeedDomains []string                `json:"seed_domains,omitempty"`
+	Scenario    string                  `json:"scenario,omitempty"`
+	Outcomes    []JudgeCandidateOutcome `json:"outcomes,omitempty"`
+}
+
 // Enumeration represents a specific discovery run for a Seed.
 // A single Seed can have multiple Enumerations over time.
 type Enumeration struct {
@@ -119,11 +142,12 @@ type IPDetails struct {
 
 // PipelineContext represents the state passed between DAG nodes.
 type PipelineContext struct {
-	mu           sync.Mutex
-	Seeds        []Seed
-	Enumerations []Enumeration
-	Assets       []Asset
-	Errors       []error
+	mu               sync.Mutex
+	Seeds            []Seed
+	Enumerations     []Enumeration
+	Assets           []Asset
+	Errors           []error
+	JudgeEvaluations []JudgeEvaluation
 
 	collectionSeeds    []Seed
 	pendingSeeds       []Seed
@@ -310,6 +334,40 @@ func (p *PipelineContext) AdvanceSeedFrontier() bool {
 	p.pendingSeeds = nil
 
 	return true
+}
+
+// RecordJudgeEvaluation appends structured judge analysis for the current run.
+func (p *PipelineContext) RecordJudgeEvaluation(evaluation JudgeEvaluation) {
+	if len(evaluation.Outcomes) == 0 {
+		return
+	}
+
+	evaluation.Collector = strings.TrimSpace(strings.ToLower(evaluation.Collector))
+	evaluation.SeedID = strings.TrimSpace(evaluation.SeedID)
+	evaluation.SeedLabel = strings.TrimSpace(evaluation.SeedLabel)
+	evaluation.Scenario = strings.TrimSpace(evaluation.Scenario)
+	evaluation.SeedDomains = uniqueNormalizedStrings(evaluation.SeedDomains)
+
+	outcomes := make([]JudgeCandidateOutcome, 0, len(evaluation.Outcomes))
+	for _, outcome := range evaluation.Outcomes {
+		outcome.Root = strings.TrimSpace(strings.ToLower(outcome.Root))
+		outcome.Kind = strings.TrimSpace(strings.ToLower(outcome.Kind))
+		outcome.Reason = strings.TrimSpace(outcome.Reason)
+		outcome.Support = uniqueJudgeSupport(outcome.Support)
+		if outcome.Root == "" {
+			continue
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	if len(outcomes) == 0 {
+		return
+	}
+	evaluation.Outcomes = outcomes
+
+	p.Lock()
+	defer p.Unlock()
+
+	p.JudgeEvaluations = append(p.JudgeEvaluations, evaluation)
 }
 
 func seedKey(seed Seed) string {
@@ -541,5 +599,28 @@ func uniqueInts(values []int) []int {
 		out = append(out, value)
 	}
 	sort.Ints(out)
+	return out
+}
+
+func uniqueJudgeSupport(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
 	return out
 }

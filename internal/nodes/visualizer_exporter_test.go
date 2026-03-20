@@ -91,6 +91,19 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		t.Fatalf("expected first snapshot to contain 2 traces, got %d", len(firstSnapshot.Traces))
 	}
 
+	if firstSnapshot.JudgeSummary == nil {
+		t.Fatalf("expected first snapshot to include judge summary, got %+v", firstSnapshot)
+	}
+	if firstSnapshot.JudgeSummary.EvaluationCount != 2 || firstSnapshot.JudgeSummary.AcceptedCount != 1 || firstSnapshot.JudgeSummary.DiscardedCount != 2 {
+		t.Fatalf("expected judge summary counts to be preserved, got %+v", firstSnapshot.JudgeSummary)
+	}
+	if !snapshotHasJudgeCandidate(firstSnapshot.JudgeSummary, "example-store.com", true) {
+		t.Fatalf("expected accepted judge candidate to be present, got %+v", firstSnapshot.JudgeSummary)
+	}
+	if !snapshotHasJudgeCandidate(firstSnapshot.JudgeSummary, "facebook.com", false) {
+		t.Fatalf("expected discarded judge candidate to be present, got %+v", firstSnapshot.JudgeSummary)
+	}
+
 	firstTrace := findTraceByAssetID(firstSnapshot.Traces, "asset-1")
 	if firstTrace == nil {
 		t.Fatalf("expected trace for asset-1 to be present, got %+v", firstSnapshot.Traces)
@@ -133,6 +146,11 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		"Same Registrable Domain",
 		"#trace/run-1/asset-1",
 		"data-trace-link",
+		"Judge Analysis",
+		"Accepted And Discarded Candidates",
+		"Discarded Candidates",
+		"facebook.com",
+		"example-store.com",
 	} {
 		if !strings.Contains(html, needle) {
 			t.Fatalf("expected rendered HTML to contain %q", needle)
@@ -268,6 +286,49 @@ func sampleVisualizerContext(seedID, enumerationID, assetID, identifier string, 
 				},
 			},
 		},
+		JudgeEvaluations: []models.JudgeEvaluation{
+			{
+				Collector:   "web_hint_collector",
+				SeedID:      seedID,
+				SeedLabel:   "Example Corp",
+				SeedDomains: []string{"example.com"},
+				Scenario:    "web ownership hints from example.com",
+				Outcomes: []models.JudgeCandidateOutcome{
+					{
+						Root:       "example-store.com",
+						Collect:    true,
+						Confidence: 0.95,
+						Kind:       "llm_link",
+						Reason:     "Canonical storefront links point to a first-party property.",
+						Explicit:   true,
+						Support:    []string{"https://example-store.com/ [canonical]"},
+					},
+					{
+						Root:       "facebook.com",
+						Collect:    false,
+						Confidence: 0.98,
+						Reason:     "Social profile links are third-party platforms, not owned roots.",
+						Explicit:   true,
+						Support:    []string{"https://facebook.com/example [follow us]"},
+					},
+				},
+			},
+			{
+				Collector:   "dns_collector",
+				SeedID:      seedID,
+				SeedLabel:   "Example Corp",
+				SeedDomains: []string{"example.com"},
+				Scenario:    "dns root variant pivot",
+				Outcomes: []models.JudgeCandidateOutcome{
+					{
+						Root:     "cloudflare.com",
+						Collect:  false,
+						Explicit: false,
+						Support:  []string{"Observed as a shared DNS target"},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -364,6 +425,24 @@ func traceSectionContains(sections []models.VisualizerTraceSection, title, fragm
 		}
 		for _, item := range section.Items {
 			if strings.Contains(item, fragment) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func snapshotHasJudgeCandidate(summary *models.VisualizerJudgeSummary, root string, accepted bool) bool {
+	if summary == nil {
+		return false
+	}
+	for _, group := range summary.Groups {
+		candidates := group.Discarded
+		if accepted {
+			candidates = group.Accepted
+		}
+		for _, candidate := range candidates {
+			if candidate.Root == root {
 				return true
 			}
 		}

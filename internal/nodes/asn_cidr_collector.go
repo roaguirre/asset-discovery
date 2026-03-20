@@ -162,17 +162,22 @@ func (c *ASNCIDRCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 			})
 		}
 
-		decisions, err := c.judge.EvaluateCandidates(ctx, ownership.Request{
+		request := ownership.Request{
 			Scenario:   "network ptr pivot",
 			Seed:       seed,
 			Candidates: judgeCandidates,
-		})
+		}
+		decisions, err := c.judge.EvaluateCandidates(ctx, request)
 		if err != nil {
 			newErrors = append(newErrors, err)
 			continue
 		}
+		recordOwnershipJudgeEvaluation(pCtx, "asn_cidr_collector", request, decisions)
 
 		for _, decision := range decisions {
+			if !decision.Collect {
+				continue
+			}
 			if !hasHighConfidenceOwnership(decision.Confidence) {
 				log.Printf("[ASN/CIDR Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
 				continue

@@ -298,15 +298,20 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 
 			metricsJudgeSubmitted = len(judgeCandidates)
 			if len(judgeCandidates) > 0 {
-				decisions, err := c.judge.EvaluateCandidates(ctx, ownership.Request{
+				request := ownership.Request{
 					Scenario:   "dns root variant pivot",
 					Seed:       seed,
 					Candidates: judgeCandidates,
-				})
+				}
+				decisions, err := c.judge.EvaluateCandidates(ctx, request)
 				if err != nil {
 					newErrors = append(newErrors, err)
 				} else {
+					recordOwnershipJudgeEvaluation(pCtx, "dns_collector", request, decisions)
 					for _, decision := range decisions {
+						if !decision.Collect {
+							continue
+						}
 						if !hasHighConfidenceOwnership(decision.Confidence) {
 							log.Printf("[DNS Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
 							continue

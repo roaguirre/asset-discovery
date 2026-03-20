@@ -186,19 +186,24 @@ func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) 
 	}
 
 	for _, group := range groups {
-		decisions, err := e.judge.EvaluateCandidates(ctx, ownership.Request{
+		request := ownership.Request{
 			Scenario:   "reverse DNS pivot",
 			Seed:       group.seed,
 			Candidates: group.candidates,
-		})
+		}
+		decisions, err := e.judge.EvaluateCandidates(ctx, request)
 		if err != nil {
 			pCtx.Lock()
 			pCtx.Errors = append(pCtx.Errors, err)
 			pCtx.Unlock()
 			continue
 		}
+		recordOwnershipJudgeEvaluation(pCtx, "ip_enricher", request, decisions)
 
 		for _, decision := range decisions {
+			if !decision.Collect {
+				continue
+			}
 			if !hasHighConfidenceOwnership(decision.Confidence) {
 				log.Printf("[IP Enricher] Skipping PTR-derived registrable domain %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
 				continue

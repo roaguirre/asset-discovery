@@ -155,9 +155,182 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads models.Visu
 			SeedCount:        len(pCtx.Seeds),
 			Downloads:        downloads,
 		},
-		Rows:   rows,
-		Traces: traces,
+		Rows:         rows,
+		Traces:       traces,
+		JudgeSummary: buildVisualizerJudgeSummary(pCtx.JudgeEvaluations),
 	}
+}
+
+type visualizerJudgeGroupAggregate struct {
+	collector   string
+	seedID      string
+	seedLabel   string
+	seedDomains []string
+	scenario    string
+	outcomes    map[string]models.JudgeCandidateOutcome
+}
+
+func buildVisualizerJudgeSummary(evaluations []models.JudgeEvaluation) *models.VisualizerJudgeSummary {
+	if len(evaluations) == 0 {
+		return nil
+	}
+
+	groupsByKey := make(map[string]*visualizerJudgeGroupAggregate)
+	evaluationCount := 0
+
+	for _, evaluation := range evaluations {
+		if len(evaluation.Outcomes) == 0 {
+			continue
+		}
+		evaluationCount++
+
+		key := strings.Join([]string{
+			evaluation.Collector,
+			evaluation.SeedID,
+			evaluation.SeedLabel,
+			strings.Join(evaluation.SeedDomains, ","),
+			evaluation.Scenario,
+		}, "\x00")
+
+		group, exists := groupsByKey[key]
+		if !exists {
+			group = &visualizerJudgeGroupAggregate{
+				collector:   evaluation.Collector,
+				seedID:      evaluation.SeedID,
+				seedLabel:   evaluation.SeedLabel,
+				seedDomains: append([]string(nil), evaluation.SeedDomains...),
+				scenario:    evaluation.Scenario,
+				outcomes:    make(map[string]models.JudgeCandidateOutcome, len(evaluation.Outcomes)),
+			}
+			groupsByKey[key] = group
+		}
+
+		for _, outcome := range evaluation.Outcomes {
+			if outcome.Root == "" {
+				continue
+			}
+
+			if existing, exists := group.outcomes[outcome.Root]; exists {
+				group.outcomes[outcome.Root] = mergeVisualizerJudgeOutcome(existing, outcome)
+				continue
+			}
+			group.outcomes[outcome.Root] = outcome
+		}
+	}
+
+	if len(groupsByKey) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(groupsByKey))
+	for key := range groupsByKey {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left := groupsByKey[keys[i]]
+		right := groupsByKey[keys[j]]
+		if left.collector != right.collector {
+			return left.collector < right.collector
+		}
+		if left.seedLabel != right.seedLabel {
+			return left.seedLabel < right.seedLabel
+		}
+		if left.seedID != right.seedID {
+			return left.seedID < right.seedID
+		}
+		return left.scenario < right.scenario
+	})
+
+	groups := make([]models.VisualizerJudgeGroup, 0, len(keys))
+	acceptedCount := 0
+	discardedCount := 0
+	for _, key := range keys {
+		group := groupsByKey[key]
+		roots := make([]string, 0, len(group.outcomes))
+		for root := range group.outcomes {
+			roots = append(roots, root)
+		}
+		sort.Strings(roots)
+
+		accepted := make([]models.VisualizerJudgeCandidate, 0)
+		discarded := make([]models.VisualizerJudgeCandidate, 0)
+		for _, root := range roots {
+			outcome := group.outcomes[root]
+			candidate := models.VisualizerJudgeCandidate{
+				Root:       outcome.Root,
+				Confidence: outcome.Confidence,
+				Kind:       outcome.Kind,
+				Reason:     outcome.Reason,
+				Explicit:   outcome.Explicit,
+				Support:    append([]string(nil), outcome.Support...),
+			}
+			if outcome.Collect {
+				accepted = append(accepted, candidate)
+				acceptedCount++
+				continue
+			}
+			discarded = append(discarded, candidate)
+			discardedCount++
+		}
+
+		groups = append(groups, models.VisualizerJudgeGroup{
+			Collector:   group.collector,
+			SeedID:      group.seedID,
+			SeedLabel:   group.seedLabel,
+			SeedDomains: append([]string(nil), group.seedDomains...),
+			Scenario:    group.scenario,
+			Accepted:    accepted,
+			Discarded:   discarded,
+		})
+	}
+
+	return &models.VisualizerJudgeSummary{
+		EvaluationCount: evaluationCount,
+		AcceptedCount:   acceptedCount,
+		DiscardedCount:  discardedCount,
+		Groups:          groups,
+	}
+}
+
+func mergeVisualizerJudgeOutcome(existing, next models.JudgeCandidateOutcome) models.JudgeCandidateOutcome {
+	if next.Collect {
+		existing.Collect = true
+	}
+	if next.Confidence > existing.Confidence {
+		existing.Confidence = next.Confidence
+	}
+	if next.Kind != "" && (existing.Kind == "" || next.Collect) {
+		existing.Kind = next.Kind
+	}
+	if next.Reason != "" && (existing.Reason == "" || next.Collect) {
+		existing.Reason = next.Reason
+	}
+	existing.Explicit = existing.Explicit || next.Explicit
+	existing.Support = mergeVisualizerJudgeSupport(existing.Support, next.Support)
+	return existing
+}
+
+func mergeVisualizerJudgeSupport(left, right []string) []string {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(left)+len(right))
+	out := make([]string, 0, len(left)+len(right))
+	for _, value := range append(append([]string(nil), left...), right...) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func visualizerRowGroup(row models.VisualizerRow) int {
@@ -1069,6 +1242,145 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       z-index: 1;
     }
 
+    .judge-shell {
+      display: grid;
+      gap: 0.85rem;
+      margin-bottom: 1rem;
+      padding: 1rem;
+      border-radius: 18px;
+      border: 1px solid rgba(126, 59, 0, 0.08);
+      background: linear-gradient(180deg, rgba(255, 248, 235, 0.92), rgba(255, 255, 255, 0.82));
+    }
+
+    .judge-shell h2 {
+      margin: 0.35rem 0 0.25rem;
+      font-family: var(--font-heading);
+      font-size: clamp(1.2rem, 1.8vw, 1.6rem);
+      line-height: 1.1;
+    }
+
+    .judge-shell p {
+      margin: 0;
+    }
+
+    .judge-groups {
+      display: grid;
+      gap: 0.85rem;
+    }
+
+    .judge-group {
+      padding: 0.95rem;
+      border-radius: 16px;
+      border: 1px solid rgba(126, 59, 0, 0.08);
+      background: rgba(255, 255, 255, 0.82);
+    }
+
+    .judge-group-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.85rem;
+    }
+
+    .judge-group-head h3 {
+      margin: 0 0 0.2rem;
+      font-family: var(--font-heading);
+      font-size: 1rem;
+    }
+
+    .judge-group-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .judge-columns {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .judge-column {
+      padding: 0.85rem;
+      border-radius: 14px;
+      border: 1px solid rgba(80, 61, 44, 0.08);
+      background: rgba(249, 244, 235, 0.6);
+    }
+
+    .judge-column h4 {
+      margin: 0 0 0.7rem;
+      font-size: 0.88rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .judge-list {
+      display: grid;
+      gap: 0.65rem;
+    }
+
+    .judge-item {
+      padding: 0.75rem;
+      border-radius: 12px;
+      border: 1px solid rgba(80, 61, 44, 0.08);
+      background: rgba(255, 255, 255, 0.82);
+    }
+
+    .judge-item-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.35rem;
+    }
+
+    .judge-item-head strong {
+      font-family: var(--font-heading);
+      font-size: 0.98rem;
+    }
+
+    .judge-item-copy {
+      display: grid;
+      gap: 0.35rem;
+    }
+
+    .judge-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+
+    .pill-accepted {
+      background: rgba(117, 156, 130, 0.16);
+      color: #365644;
+    }
+
+    .pill-discarded {
+      background: rgba(126, 59, 0, 0.1);
+      color: var(--accent-strong);
+    }
+
+    .pill-subtle {
+      background: rgba(80, 61, 44, 0.08);
+      color: var(--muted);
+      text-transform: none;
+    }
+
+    .judge-support {
+      margin: 0;
+      padding-left: 1rem;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .judge-support li + li {
+      margin-top: 0.3rem;
+    }
+
     .table-meta {
       display: grid;
       gap: 0.75rem;
@@ -1452,6 +1764,14 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         <span>Visible Rows</span>
         <strong id="visible-count">0</strong>
       </article>
+      <article class="metric">
+        <span>Judge Accepted</span>
+        <strong id="judge-accepted-count">0</strong>
+      </article>
+      <article class="metric">
+        <span>Judge Discarded</span>
+        <strong id="judge-discarded-count">0</strong>
+      </article>
     </section>
 
     <section class="table-shell">
@@ -1465,6 +1785,14 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         </div>
         <div id="download-links"></div>
       </div>
+      <section class="judge-shell" id="judge-shell" hidden>
+        <div>
+          <div class="eyebrow">Judge Analysis</div>
+          <h2>Accepted And Discarded Candidates</h2>
+          <p class="muted" id="judge-caption">No judge evaluations were captured for this run.</p>
+        </div>
+        <div class="judge-groups" id="judge-groups"></div>
+      </section>
       <div class="table-wrap" id="results-view">
         <table>
           <thead>
@@ -1542,6 +1870,9 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     const emptyState = document.getElementById("empty-state");
     const downloadLinks = document.getElementById("download-links");
     const tableCaption = document.getElementById("table-caption");
+    const judgeShell = document.getElementById("judge-shell");
+    const judgeCaption = document.getElementById("judge-caption");
+    const judgeGroups = document.getElementById("judge-groups");
     const appTooltip = document.getElementById("app-tooltip");
 
     document.getElementById("run-count").textContent = String(runs.length);
@@ -2008,6 +2339,124 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       });
     }
 
+    function humanizeKey(value) {
+      return String(value || "")
+        .replaceAll("_", " ")
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function formatConfidence(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric <= 0) {
+        return "";
+      }
+      return numeric.toFixed(2);
+    }
+
+    function renderJudgeCandidate(candidate, accepted) {
+      const meta = [];
+      if (candidate.kind) {
+        meta.push("<span class=\"pill pill-subtle\">" + escapeHTML(candidate.kind) + "</span>");
+      }
+      const confidence = formatConfidence(candidate.confidence);
+      if (confidence) {
+        meta.push("<span class=\"pill pill-subtle\">Confidence " + escapeHTML(confidence) + "</span>");
+      }
+      meta.push("<span class=\"pill pill-subtle\">" + (candidate.explicit ? "Explicit" : "Implicit") + "</span>");
+
+      const support = Array.isArray(candidate.support) && candidate.support.length > 0
+        ? "<ul class=\"judge-support\">" + candidate.support.map((item) => "<li>" + escapeHTML(item) + "</li>").join("") + "</ul>"
+        : "";
+
+      return [
+        "<article class=\"judge-item\">",
+        "<div class=\"judge-item-head\">",
+        "<strong>", escapeHTML(candidate.root || "unknown"), "</strong>",
+        "<span class=\"pill ", accepted ? "pill-accepted" : "pill-discarded", "\">", accepted ? "Accepted" : "Discarded", "</span>",
+        "</div>",
+        "<div class=\"judge-item-copy\">",
+        candidate.reason ? "<div>" + escapeHTML(candidate.reason) + "</div>" : "<div class=\"muted\">No reason was returned for this candidate.</div>",
+        meta.length > 0 ? "<div class=\"judge-meta\">" + meta.join("") + "</div>" : "",
+        support,
+        "</div>",
+        "</article>",
+      ].join("");
+    }
+
+    function renderJudgeGroup(group) {
+      const seedLabel = group.seed_label || group.seed_id || "Unknown seed";
+      const seedDomains = Array.isArray(group.seed_domains) && group.seed_domains.length > 0
+        ? group.seed_domains.join(", ")
+        : "";
+      const accepted = Array.isArray(group.accepted) ? group.accepted : [];
+      const discarded = Array.isArray(group.discarded) ? group.discarded : [];
+      const groupMeta = [
+        "<span class=\"pill pill-subtle\">", escapeHTML(group.collector || "judge"), "</span>",
+      ];
+      if (group.scenario) {
+        groupMeta.push("<span class=\"pill pill-subtle\">", escapeHTML(group.scenario), "</span>");
+      }
+      if (seedDomains) {
+        groupMeta.push("<span class=\"pill pill-subtle\">", escapeHTML(seedDomains), "</span>");
+      }
+
+      const renderColumn = (title, items, acceptedItems) => {
+        if (items.length === 0) {
+          return [
+            "<section class=\"judge-column\">",
+            "<h4>", escapeHTML(title), "</h4>",
+            "<p class=\"muted\">No candidates in this bucket.</p>",
+            "</section>",
+          ].join("");
+        }
+
+        return [
+          "<section class=\"judge-column\">",
+          "<h4>", escapeHTML(title), "</h4>",
+          "<div class=\"judge-list\">",
+          items.map((item) => renderJudgeCandidate(item, acceptedItems)).join(""),
+          "</div>",
+          "</section>",
+        ].join("");
+      };
+
+      return [
+        "<article class=\"judge-group\">",
+        "<div class=\"judge-group-head\">",
+        "<div>",
+        "<h3>", escapeHTML(humanizeKey(group.collector || "judge")), " for ", escapeHTML(seedLabel), "</h3>",
+        group.seed_id && group.seed_id !== seedLabel ? "<div class=\"muted\">Seed ID: " + escapeHTML(group.seed_id) + "</div>" : "",
+        "</div>",
+        "<div class=\"judge-group-meta\">", groupMeta.join(""), "</div>",
+        "</div>",
+        "<div class=\"judge-columns\">",
+        renderColumn("Accepted Candidates (" + String(accepted.length) + ")", accepted, true),
+        renderColumn("Discarded Candidates (" + String(discarded.length) + ")", discarded, false),
+        "</div>",
+        "</article>",
+      ].join("");
+    }
+
+    function renderJudgeSummary(run) {
+      const summary = run && run.judge_summary ? run.judge_summary : null;
+      const groups = summary && Array.isArray(summary.groups) ? summary.groups : [];
+
+      judgeGroups.innerHTML = "";
+      if (!summary || groups.length === 0) {
+        judgeShell.hidden = true;
+        judgeCaption.textContent = "No judge evaluations were captured for this run.";
+        return;
+      }
+
+      judgeShell.hidden = false;
+      judgeCaption.textContent =
+        "Captured " + String(summary.evaluation_count || 0) +
+        " judge evaluation" + ((summary.evaluation_count || 0) === 1 ? "" : "s") +
+        " across " + String((summary.accepted_count || 0) + (summary.discarded_count || 0)) +
+        " unique candidate roots.";
+      judgeGroups.innerHTML = groups.map((group) => renderJudgeGroup(group)).join("");
+    }
+
     function renderTable() {
       const run = currentRun();
       const rows = visibleRows(run);
@@ -2021,9 +2470,12 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       document.getElementById("enumeration-count").textContent = String(run ? run.enumeration_count : 0);
       document.getElementById("seed-count").textContent = String(run ? run.seed_count : 0);
       document.getElementById("visible-count").textContent = String(rows.length);
+      document.getElementById("judge-accepted-count").textContent = String(run && run.judge_summary ? run.judge_summary.accepted_count || 0 : 0);
+      document.getElementById("judge-discarded-count").textContent = String(run && run.judge_summary ? run.judge_summary.discarded_count || 0 : 0);
       tableCaption.textContent = run ? "Showing " + rows.length + " of " + run.rows.length + " rows from " + run.label + "." : "No archived runs loaded.";
 
       renderDownloads(run);
+      renderJudgeSummary(run);
 
       const showTrace = state.view === "trace" && trace;
       resultsView.hidden = showTrace;

@@ -27,7 +27,7 @@ const (
 	defaultCrawlerMaxPagesPerSeed   = 12
 	defaultCrawlerMaxLinksPerPage   = 128
 	defaultCrawlerMaxSamplesPerRoot = 5
-	maxCrawlerJudgeCandidates       = 20
+	maxCrawlerJudgeBatchSize        = 20
 	crawlerBodyLimit                = 1024 * 1024
 )
 
@@ -131,62 +131,83 @@ func (c *CrawlerCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 			continue
 		}
 
-		decisions, err := c.judge.EvaluateCandidates(ctx, ownership.Request{
-			Scenario:   "crawler outbound link pivot",
-			Seed:       seed,
-			Candidates: judgeCandidates,
-		})
-		if err != nil {
-			newErrors = append(newErrors, err)
-			continue
-		}
-
-		for _, decision := range decisions {
-			if !hasHighConfidenceOwnership(decision.Confidence) {
-				log.Printf("[Crawler Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
-				continue
+		for start := 0; start < len(judgeCandidates); start += maxCrawlerJudgeBatchSize {
+			end := start + maxCrawlerJudgeBatchSize
+			if end > len(judgeCandidates) {
+				end = len(judgeCandidates)
 			}
 
-			candidate, exists := selected[decision.Root]
-			if !exists {
-				continue
+			batch := judgeCandidates[start:end]
+			allowedRoots := make(map[string]struct{}, len(batch))
+			for _, candidate := range batch {
+				allowedRoots[candidate.Root] = struct{}{}
 			}
 
-			newAssets = append(newAssets, models.Asset{
-				ID:            newNodeID("dom-crawler"),
-				EnumerationID: enum.ID,
-				Type:          models.AssetTypeDomain,
-				Identifier:    decision.Root,
-				Source:        "crawler_collector",
-				DiscoveryDate: c.now(),
-				DomainDetails: &models.DomainDetails{},
-				EnrichmentData: map[string]interface{}{
-					"crawl_kind":           "judged_outbound_root",
-					"crawl_observations":   candidate.ObservationCount,
-					"crawl_relations":      candidate.sortedRelations(),
-					"crawl_samples":        candidate.sampleStrings(3),
-					"ownership_confidence": decision.Confidence,
-				},
-			})
+			request := ownership.Request{
+				Scenario:   "crawler outbound link pivot",
+				Seed:       seed,
+				Candidates: batch,
+			}
+			decisions, err := c.judge.EvaluateCandidates(ctx, request)
+			if err != nil {
+				newErrors = append(newErrors, err)
+				continue
+			}
+			recordOwnershipJudgeEvaluation(pCtx, "crawler_collector", request, decisions)
 
-			discoveredSeed := discovery.BuildDiscoveredSeed(seed, decision.Root, "crawler-outbound")
-			discoveredSeed.Evidence = []models.SeedEvidence{
-				{
-					Source:     "crawler_collector",
-					Kind:       "outbound_link",
+			for _, decision := range decisions {
+				if _, exists := allowedRoots[decision.Root]; !exists {
+					continue
+				}
+				if !decision.Collect {
+					continue
+				}
+				if !hasHighConfidenceOwnership(decision.Confidence) {
+					log.Printf("[Crawler Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
+					continue
+				}
+
+				candidate, exists := selected[decision.Root]
+				if !exists {
+					continue
+				}
+
+				newAssets = append(newAssets, models.Asset{
+					ID:            newNodeID("dom-crawler"),
+					EnumerationID: enum.ID,
+					Type:          models.AssetTypeDomain,
+					Identifier:    decision.Root,
+					Source:        "crawler_collector",
+					DiscoveryDate: c.now(),
+					DomainDetails: &models.DomainDetails{},
+					EnrichmentData: map[string]interface{}{
+						"crawl_kind":           "judged_outbound_root",
+						"crawl_observations":   candidate.ObservationCount,
+						"crawl_relations":      candidate.sortedRelations(),
+						"crawl_samples":        candidate.sampleStrings(3),
+						"ownership_confidence": decision.Confidence,
+					},
+				})
+
+				discoveredSeed := discovery.BuildDiscoveredSeed(seed, decision.Root, "crawler-outbound")
+				discoveredSeed.Evidence = []models.SeedEvidence{
+					{
+						Source:     "crawler_collector",
+						Kind:       "outbound_link",
+						Value:      decision.Root,
+						Confidence: crawlerSeedEvidenceConfidence(candidate),
+					},
+				}
+
+				if pCtx.EnqueueSeedCandidate(discoveredSeed, models.SeedEvidence{
+					Source:     "ownership_judge",
+					Kind:       decision.Kind,
 					Value:      decision.Root,
-					Confidence: crawlerSeedEvidenceConfidence(candidate),
-				},
-			}
-
-			if pCtx.EnqueueSeedCandidate(discoveredSeed, models.SeedEvidence{
-				Source:     "ownership_judge",
-				Kind:       decision.Kind,
-				Value:      decision.Root,
-				Confidence: decision.Confidence,
-				Reasoned:   true,
-			}) {
-				log.Printf("[Crawler Collector] Promoted %s from judged outbound links.", decision.Root)
+					Confidence: decision.Confidence,
+					Reasoned:   true,
+				}) {
+					log.Printf("[Crawler Collector] Promoted %s from judged outbound links.", decision.Root)
+				}
 			}
 		}
 	}
@@ -509,17 +530,14 @@ func buildCrawlerJudgeCandidates(outboundByRoot map[string]*crawlerRootCandidate
 	}
 
 	sort.SliceStable(candidates, func(i, j int) bool {
-		left := crawlerCandidateScore(candidates[i])
-		right := crawlerCandidateScore(candidates[j])
-		if left != right {
-			return left > right
+		if candidates[i].ObservationCount != candidates[j].ObservationCount {
+			return candidates[i].ObservationCount > candidates[j].ObservationCount
+		}
+		if len(candidates[i].referrers) != len(candidates[j].referrers) {
+			return len(candidates[i].referrers) > len(candidates[j].referrers)
 		}
 		return candidates[i].Root < candidates[j].Root
 	})
-
-	if len(candidates) > maxCrawlerJudgeCandidates {
-		candidates = candidates[:maxCrawlerJudgeCandidates]
-	}
 
 	selected := make(map[string]*crawlerRootCandidate, len(candidates))
 	requests := make([]ownership.Candidate, 0, len(candidates))
@@ -618,25 +636,6 @@ func (c *crawlerRootCandidate) sampleStrings(limit int) []string {
 		samples = append(samples, strings.Join(parts, " | "))
 	}
 	return samples
-}
-
-func crawlerCandidateScore(candidate *crawlerRootCandidate) int {
-	if candidate == nil {
-		return 0
-	}
-
-	score := candidate.ObservationCount*10 + len(candidate.referrers)*6
-	for _, relation := range candidate.sortedRelations() {
-		switch relation {
-		case "about", "careers", "contact", "investor_relations", "legal", "privacy", "security":
-			score += 8
-		case "redirect":
-			score += 6
-		default:
-			score += 2
-		}
-	}
-	return score
 }
 
 func crawlerSeedEvidenceConfidence(candidate *crawlerRootCandidate) float64 {
