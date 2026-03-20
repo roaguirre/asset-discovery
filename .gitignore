@@ -8,3 +8,4 @@ exports/
 *.xlsx
 
 .DS_STORE
+.playwright-cli/

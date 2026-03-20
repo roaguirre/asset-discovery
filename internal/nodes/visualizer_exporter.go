@@ -1013,6 +1013,10 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
 
     * { box-sizing: border-box; }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       min-height: 100vh;
@@ -1269,25 +1273,53 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     }
 
     .judge-group {
-      padding: 0.95rem;
+      overflow: hidden;
       border-radius: 16px;
       border: 1px solid rgba(126, 59, 0, 0.08);
       background: rgba(255, 255, 255, 0.82);
     }
 
-    .judge-group-head {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 0.75rem;
-      margin-bottom: 0.85rem;
+    .judge-group summary {
+      list-style: none;
     }
 
-    .judge-group-head h3 {
+    .judge-group summary::-webkit-details-marker,
+    .judge-item summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .judge-group-toggle {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.95rem 1rem;
+      cursor: pointer;
+    }
+
+    .judge-group-toggle::after {
+      content: "▾";
+      flex: none;
+      color: var(--muted);
+      font-size: 0.92rem;
+      transition: transform 160ms ease;
+    }
+
+    .judge-group[open] .judge-group-toggle::after {
+      transform: rotate(180deg);
+    }
+
+    .judge-group-toggle h3 {
       margin: 0 0 0.2rem;
       font-family: var(--font-heading);
       font-size: 1rem;
+    }
+
+    .judge-group-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
     }
 
     .judge-group-meta {
@@ -1300,6 +1332,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 0.75rem;
+      padding: 0 1rem 1rem;
     }
 
     .judge-column {
@@ -1323,19 +1356,26 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     }
 
     .judge-item {
-      padding: 0.75rem;
+      overflow: hidden;
       border-radius: 12px;
       border: 1px solid rgba(80, 61, 44, 0.08);
       background: rgba(255, 255, 255, 0.82);
     }
 
-    .judge-item-head {
+    .judge-item-summary {
       display: flex;
       flex-wrap: wrap;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
-      gap: 0.5rem;
-      margin-bottom: 0.35rem;
+      gap: 0.75rem;
+      padding: 0.75rem 0.85rem;
+      cursor: pointer;
+    }
+
+    .judge-item-head {
+      display: grid;
+      gap: 0.28rem;
+      min-width: 0;
     }
 
     .judge-item-head strong {
@@ -1343,9 +1383,15 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       font-size: 0.98rem;
     }
 
+    .judge-item-reason {
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
     .judge-item-copy {
       display: grid;
       gap: 0.35rem;
+      padding: 0 0.85rem 0.85rem;
     }
 
     .judge-meta {
@@ -1367,6 +1413,12 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     .pill-subtle {
       background: rgba(80, 61, 44, 0.08);
       color: var(--muted);
+      text-transform: none;
+    }
+
+    .pill-count {
+      background: rgba(117, 156, 130, 0.14);
+      color: #365644;
       text-transform: none;
     }
 
@@ -2356,7 +2408,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     function renderJudgeCandidate(candidate, accepted) {
       const meta = [];
       if (candidate.kind) {
-        meta.push("<span class=\"pill pill-subtle\">" + escapeHTML(candidate.kind) + "</span>");
+        meta.push("<span class=\"pill pill-subtle\">" + escapeHTML(humanizeKey(candidate.kind)) + "</span>");
       }
       const confidence = formatConfidence(candidate.confidence);
       if (confidence) {
@@ -2369,17 +2421,21 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         : "";
 
       return [
-        "<article class=\"judge-item\">",
+        "<details class=\"judge-item\">",
+        "<summary class=\"judge-item-summary\">",
         "<div class=\"judge-item-head\">",
         "<strong>", escapeHTML(candidate.root || "unknown"), "</strong>",
-        "<span class=\"pill ", accepted ? "pill-accepted" : "pill-discarded", "\">", accepted ? "Accepted" : "Discarded", "</span>",
+        candidate.reason
+          ? "<div class=\"judge-item-reason\">" + escapeHTML(candidate.reason) + "</div>"
+          : "<div class=\"judge-item-reason\">No reason was returned for this candidate.</div>",
         "</div>",
+        "<span class=\"pill ", accepted ? "pill-accepted" : "pill-discarded", "\">", accepted ? "Accepted" : "Discarded", "</span>",
+        "</summary>",
         "<div class=\"judge-item-copy\">",
-        candidate.reason ? "<div>" + escapeHTML(candidate.reason) + "</div>" : "<div class=\"muted\">No reason was returned for this candidate.</div>",
         meta.length > 0 ? "<div class=\"judge-meta\">" + meta.join("") + "</div>" : "",
         support,
         "</div>",
-        "</article>",
+        "</details>",
       ].join("");
     }
 
@@ -2391,14 +2447,18 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       const accepted = Array.isArray(group.accepted) ? group.accepted : [];
       const discarded = Array.isArray(group.discarded) ? group.discarded : [];
       const groupMeta = [
-        "<span class=\"pill pill-subtle\">", escapeHTML(group.collector || "judge"), "</span>",
+        "<span class=\"pill pill-subtle\">", escapeHTML(humanizeKey(group.collector || "judge")), "</span>",
       ];
       if (group.scenario) {
-        groupMeta.push("<span class=\"pill pill-subtle\">", escapeHTML(group.scenario), "</span>");
+        groupMeta.push("<span class=\"pill pill-subtle\">", escapeHTML(humanizeKey(group.scenario)), "</span>");
       }
       if (seedDomains) {
         groupMeta.push("<span class=\"pill pill-subtle\">", escapeHTML(seedDomains), "</span>");
       }
+      const groupStats = [
+        "<span class=\"pill pill-count\">Accepted " + String(accepted.length) + "</span>",
+        "<span class=\"pill pill-count\">Discarded " + String(discarded.length) + "</span>",
+      ];
 
       const renderColumn = (title, items, acceptedItems) => {
         if (items.length === 0) {
@@ -2421,28 +2481,31 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       };
 
       return [
-        "<article class=\"judge-group\">",
-        "<div class=\"judge-group-head\">",
+        "<details class=\"judge-group\">",
+        "<summary class=\"judge-group-toggle\">",
         "<div>",
         "<h3>", escapeHTML(humanizeKey(group.collector || "judge")), " for ", escapeHTML(seedLabel), "</h3>",
         group.seed_id && group.seed_id !== seedLabel ? "<div class=\"muted\">Seed ID: " + escapeHTML(group.seed_id) + "</div>" : "",
         "</div>",
+        "<div>",
+        "<div class=\"judge-group-stats\">", groupStats.join(""), "</div>",
         "<div class=\"judge-group-meta\">", groupMeta.join(""), "</div>",
         "</div>",
+        "</summary>",
         "<div class=\"judge-columns\">",
         renderColumn("Accepted Candidates (" + String(accepted.length) + ")", accepted, true),
         renderColumn("Discarded Candidates (" + String(discarded.length) + ")", discarded, false),
         "</div>",
-        "</article>",
+        "</details>",
       ].join("");
     }
 
-    function renderJudgeSummary(run) {
+    function renderJudgeSummary(run, showTrace) {
       const summary = run && run.judge_summary ? run.judge_summary : null;
       const groups = summary && Array.isArray(summary.groups) ? summary.groups : [];
 
       judgeGroups.innerHTML = "";
-      if (!summary || groups.length === 0) {
+      if (showTrace || !summary || groups.length === 0) {
         judgeShell.hidden = true;
         judgeCaption.textContent = "No judge evaluations were captured for this run.";
         return;
@@ -2475,9 +2538,9 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       tableCaption.textContent = run ? "Showing " + rows.length + " of " + run.rows.length + " rows from " + run.label + "." : "No archived runs loaded.";
 
       renderDownloads(run);
-      renderJudgeSummary(run);
 
       const showTrace = state.view === "trace" && trace;
+      renderJudgeSummary(run, showTrace);
       resultsView.hidden = showTrace;
       traceView.hidden = !showTrace;
       resultsViewButton.classList.toggle("is-active", !showTrace);
