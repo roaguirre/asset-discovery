@@ -83,6 +83,12 @@ docker run -v $(pwd):/data asset-discovery --seeds /data/seeds.json --outputs /d
 
 ## Developing
 
+### Generated DNS Suffix Data
+
+The DNS variant sweep uses a generated ICANN public suffix list derived from the pinned `golang.org/x/net/publicsuffix` module version in `go.mod`.
+
+Normal installs and builds do not require `make generate`; the generated file is checked in. Run `make generate` only when you update `golang.org/x/net` and want to refresh the generated suffix data before testing or committing.
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for design principles and data models.
 See [AGENTS.md](AGENTS.md) for how AI coding assistants should interact with this repository.
 See [docs/dag_visualization.html](docs/dag_visualization.html) for an interactive view of the scheduler-managed pipeline and topological sort behavior.

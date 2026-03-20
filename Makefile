@@ -1,7 +1,10 @@
-.PHONY: validate test test-e2e build
+.PHONY: validate test test-e2e build generate
 
 build:
 	go build -o discover cmd/discover/main.go
+
+generate:
+	go generate ./internal/discovery
 
 test:
 	go test -v ./...
