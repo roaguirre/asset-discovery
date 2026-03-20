@@ -126,3 +126,63 @@ func TestEngine_Run_UsesFrontierForFollowUpCollection(t *testing.T) {
 		t.Fatalf("expected discovered seed to be registered once, got %d seeds", len(resultCtx.Seeds))
 	}
 }
+
+type chainedSeedSchedulingEnricher struct {
+	callCount int
+}
+
+func (e *chainedSeedSchedulingEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	e.callCount++
+
+	switch e.callCount {
+	case 1:
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-2",
+			CompanyName: "ptr.example.com",
+			Domains:     []string{"ptr.example.com"},
+		})
+	case 2:
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-3",
+			CompanyName: "example-store.com",
+			Domains:     []string{"example-store.com"},
+		})
+	}
+
+	return pCtx, nil
+}
+
+func TestEngine_Run_CollectsLateDiscoveredFollowUpSeed(t *testing.T) {
+	collector := &frontierCollector{}
+	enricher := &chainedSeedSchedulingEnricher{}
+
+	engine := &dag.Engine{
+		Collectors: []dag.Collector{collector},
+		Enrichers:  []dag.Enricher{enricher},
+	}
+
+	ctx := context.Background()
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	}
+
+	resultCtx, err := engine.Run(ctx, pCtx)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	expectedSeedsPerCall := []int{1, 1, 1}
+	if !reflect.DeepEqual(collector.seedsPerCall, expectedSeedsPerCall) {
+		t.Fatalf("expected collector frontier sizes %v, got %v", expectedSeedsPerCall, collector.seedsPerCall)
+	}
+
+	if len(resultCtx.Seeds) != 3 {
+		t.Fatalf("expected chained discovered seeds to be registered, got %d seeds", len(resultCtx.Seeds))
+	}
+}

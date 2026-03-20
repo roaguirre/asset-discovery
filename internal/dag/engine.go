@@ -42,7 +42,9 @@ type Engine struct {
 	Exporters  []Exporter
 }
 
-const maxSeedExpansionDepth = 1
+// Allow initial seeds plus two discovered frontiers so roots found in the first
+// follow-up wave still get a collection pass of their own.
+const maxSeedExpansionDepth = 2
 
 // Run executes the DAG synchronously for local E2E testing.
 func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
