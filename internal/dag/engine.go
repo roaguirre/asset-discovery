@@ -2,9 +2,11 @@ package dag
 
 import (
 	"context"
+	"reflect"
 	"sync"
 
 	"asset-discovery/internal/models"
+	"asset-discovery/internal/tracing/telemetry"
 )
 
 // Node represents a stage in the DAG pipeline.
@@ -40,6 +42,8 @@ type Engine struct {
 	Enrichers  []Enricher
 	Filters    []Filter
 	Exporters  []Exporter
+	RunID      string
+	Telemetry  telemetry.Provider
 }
 
 // Allow initial seeds plus two discovered frontiers so roots found in the first
@@ -48,19 +52,33 @@ const maxSeedExpansionDepth = 2
 
 // Run executes the DAG synchronously for local E2E testing.
 func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	provider := telemetry.OrNoop(e.Telemetry)
+	ctx = telemetry.WithProvider(ctx, provider)
+
+	ctx, runSpan := telemetry.Start(ctx, "dag.run", telemetry.String("run_id", e.RunID))
+	defer runSpan.End()
+
 	// The engine may execute multiple collection waves, but the stage order remains acyclic:
 	// frontier -> collectors -> enrichers -> next frontier.
 	pCtx.InitializeSeedFrontier(maxSeedExpansionDepth)
+	wave := 0
 
 	for {
 		// 1. Run Collectors (Concurrently)
-		if len(pCtx.CollectionSeeds()) > 0 {
+		if frontier := pCtx.CollectionSeeds(); len(frontier) > 0 {
+			waveCtx, waveSpan := telemetry.Start(
+				ctx,
+				"dag.wave",
+				telemetry.String("run_id", e.RunID),
+				telemetry.Int("wave", wave),
+				telemetry.Int("frontier_size", len(frontier)),
+			)
 			var wg sync.WaitGroup
 			for _, c := range e.Collectors {
 				wg.Add(1)
 				go func(col Collector) {
 					defer wg.Done()
-					_, err := col.Process(ctx, pCtx)
+					err := e.processNode(waveCtx, "collect", wave, col, pCtx)
 					if err != nil {
 						pCtx.Lock()
 						pCtx.Errors = append(pCtx.Errors, err)
@@ -69,12 +87,12 @@ func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models
 				}(c)
 			}
 			wg.Wait()
+			waveSpan.End()
 		}
 
 		// 2. Run Enrichers
 		for _, en := range e.Enrichers {
-			var err error
-			pCtx, err = en.Process(ctx, pCtx)
+			err := e.processNode(ctx, "enrich", wave, en, pCtx)
 			if err != nil {
 				return pCtx, err
 			}
@@ -83,12 +101,12 @@ func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models
 		if !pCtx.AdvanceSeedFrontier() {
 			break
 		}
+		wave++
 	}
 
 	// 3. Run Filters
 	for _, f := range e.Filters {
-		var err error
-		pCtx, err = f.Process(ctx, pCtx)
+		err := e.processNode(ctx, "filter", wave, f, pCtx)
 		if err != nil {
 			return pCtx, err
 		}
@@ -96,12 +114,42 @@ func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models
 
 	// 4. Run Exporters
 	for _, ex := range e.Exporters {
-		var err error
-		pCtx, err = ex.Process(ctx, pCtx)
+		err := e.processNode(ctx, "export", wave, ex, pCtx)
 		if err != nil {
 			return pCtx, err
 		}
 	}
 
 	return pCtx, nil
+}
+
+func (e *Engine) processNode(ctx context.Context, stage string, wave int, node Node, pCtx *models.PipelineContext) error {
+	nodeName := nodeTypeName(node)
+	nodeCtx, span := telemetry.Start(
+		ctx,
+		"dag.node",
+		telemetry.String("run_id", e.RunID),
+		telemetry.String("stage", stage),
+		telemetry.String("node", nodeName),
+		telemetry.Int("wave", wave),
+	)
+
+	_, err := node.Process(nodeCtx, pCtx)
+	span.End(telemetry.Err(err))
+	return err
+}
+
+func nodeTypeName(node Node) string {
+	if node == nil {
+		return "unknown"
+	}
+
+	typ := reflect.TypeOf(node)
+	for typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	if typ.Name() == "" {
+		return "unknown"
+	}
+	return typ.Name()
 }

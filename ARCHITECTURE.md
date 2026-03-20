@@ -5,8 +5,10 @@ This document describes the architectural decisions for the Asset Discovery proj
 ## Core Principles
 
 -   **Separation of Concerns**: Each stage of the pipeline (Collection, Enrichment, Filtering, Exporting) is completely isolated. They communicate strictly via data models, not by calling each other's functional logic.
+-   **Runtime-Owned Assembly**: `internal/app` is the single place that wires the DAG, shared judges, HTTP clients, outputs, and runtime policy together.
 -   **Simplicity first, extensibility second**: The initial implementation uses an in-memory DAG engine for orchestration to allow local E2E testing easily.
 -   **Prepared for Event-Driven Design**: The interfaces and contexts are designed so that the in-memory DAG can later be replaced with a PubSub/Message-Queue architecture (e.g., Kafka, NATS, RabbitMQ) for distributed, horizontally scalable microservices.
+-   **Split Tracing Concerns**: Runtime observability lives under `internal/tracing/telemetry`, while exported provenance and judge lineage live under `internal/tracing/lineage`.
 
 ## Collection Strategies
 

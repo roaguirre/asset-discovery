@@ -7,6 +7,7 @@ import (
 
 	"asset-discovery/internal/dag"
 	"asset-discovery/internal/models"
+	"asset-discovery/internal/tracing/telemetry"
 )
 
 type mockNode struct {
@@ -184,5 +185,99 @@ func TestEngine_Run_CollectsLateDiscoveredFollowUpSeed(t *testing.T) {
 
 	if len(resultCtx.Seeds) != 3 {
 		t.Fatalf("expected chained discovered seeds to be registered, got %d seeds", len(resultCtx.Seeds))
+	}
+}
+
+type recordedSpan struct {
+	name  string
+	attrs map[string]interface{}
+}
+
+type recordingTelemetry struct {
+	spans []recordedSpan
+}
+
+type recordingSpan struct{}
+
+func (r *recordingTelemetry) Start(ctx context.Context, name string, attrs ...telemetry.Attr) (context.Context, telemetry.Span) {
+	values := make(map[string]interface{}, len(attrs))
+	for _, attr := range attrs {
+		values[attr.Key] = attr.Value
+	}
+	r.spans = append(r.spans, recordedSpan{name: name, attrs: values})
+	return ctx, recordingSpan{}
+}
+
+func (r *recordingTelemetry) Log(ctx context.Context, level telemetry.Level, message string, attrs ...telemetry.Attr) {
+}
+
+func (recordingSpan) End(attrs ...telemetry.Attr) {}
+
+func TestEngine_Run_EmitsTelemetryForWavesAndNodes(t *testing.T) {
+	collector := &frontierCollector{}
+	enricher := &seedSchedulingEnricher{}
+	telemetryRecorder := &recordingTelemetry{}
+
+	engine := &dag.Engine{
+		Collectors: []dag.Collector{collector},
+		Enrichers:  []dag.Enricher{enricher},
+		RunID:      "run-telemetry",
+		Telemetry:  telemetryRecorder,
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	}
+
+	if _, err := engine.Run(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	var waveSpans []recordedSpan
+	var nodeSpans []recordedSpan
+	for _, span := range telemetryRecorder.spans {
+		switch span.name {
+		case "dag.wave":
+			waveSpans = append(waveSpans, span)
+		case "dag.node":
+			nodeSpans = append(nodeSpans, span)
+		}
+	}
+
+	if len(waveSpans) != 2 {
+		t.Fatalf("expected 2 wave spans, got %d", len(waveSpans))
+	}
+	if len(nodeSpans) != 4 {
+		t.Fatalf("expected 4 node spans, got %d", len(nodeSpans))
+	}
+
+	for _, span := range waveSpans {
+		if span.attrs["run_id"] != "run-telemetry" {
+			t.Fatalf("expected wave span to include run_id, got %+v", span.attrs)
+		}
+		if _, ok := span.attrs["wave"]; !ok {
+			t.Fatalf("expected wave span to include wave attr, got %+v", span.attrs)
+		}
+	}
+
+	for _, span := range nodeSpans {
+		if span.attrs["run_id"] != "run-telemetry" {
+			t.Fatalf("expected node span to include run_id, got %+v", span.attrs)
+		}
+		if _, ok := span.attrs["stage"]; !ok {
+			t.Fatalf("expected node span to include stage attr, got %+v", span.attrs)
+		}
+		if _, ok := span.attrs["node"]; !ok {
+			t.Fatalf("expected node span to include node attr, got %+v", span.attrs)
+		}
+		if _, ok := span.attrs["wave"]; !ok {
+			t.Fatalf("expected node span to include wave attr, got %+v", span.attrs)
+		}
 	}
 }

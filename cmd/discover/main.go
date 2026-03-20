@@ -6,23 +6,18 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"asset-discovery/internal/dag"
+	"asset-discovery/internal/app"
 	"asset-discovery/internal/models"
-	"asset-discovery/internal/nodes"
+	"asset-discovery/internal/tracing/telemetry"
 )
 
 var (
 	seedsFile string
 	outputs   []string
 )
-
-const defaultVisualizerOutput = "exports/visualizer.html"
 
 var rootCmd = &cobra.Command{
 	Use:   "discover",
@@ -40,49 +35,15 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		ctx := context.Background()
-		pCtx := &models.PipelineContext{
-			Seeds: seeds,
-		}
+		pipeline := app.NewPipeline(app.Config{
+			Outputs:        outputs,
+			OutputsChanged: cmd.Flags().Changed("outputs"),
+			Telemetry:      telemetry.NewStdlibProvider(log.Default()),
+		})
 
-		runStartedAt := time.Now()
-		resolvedOutputs, runID := resolveOutputTargets(outputs, cmd.Flags().Changed("outputs"), runStartedAt)
-		exporters := buildExporters(resolvedOutputs, runID)
-
-		if len(resolvedOutputs) > 0 {
-			log.Printf("Export run %s will write to: %s", runID, strings.Join(resolvedOutputs, ", "))
-		}
-
-		// 2. Initialize Engine & Nodes
-		engine := &dag.Engine{
-			Collectors: []dag.Collector{
-				nodes.NewDNSCollector(),
-				nodes.NewCrtShCollector(),
-				nodes.NewRDAPCollector(),
-				nodes.NewReverseRegistrationCollector(),
-				nodes.NewHackerTargetCollector(),
-				nodes.NewAlienVaultCollector(),
-				nodes.NewWaybackCollector(),
-				nodes.NewASNCIDRCollector(),
-				nodes.NewCrawlerCollector(),
-				nodes.NewWebHintCollector(),
-			},
-			Enrichers: []dag.Enricher{
-				nodes.NewDNSResolverEnricher(),
-				nodes.NewIPEnricher(),
-			},
-			Filters:   []dag.Filter{nodes.NewMergeFilter()},
-			Exporters: exporters,
-		}
-
-		log.Println("Starting pipeline...")
-
-		// 3. Run Engine
-		_, err := engine.Run(ctx, pCtx)
+		_, err := pipeline.Run(context.Background(), seeds)
 		if err != nil {
-			log.Printf("Pipeline completed with error: %v", err)
-		} else {
-			log.Println("Pipeline completed successfully.")
+			return nil
 		}
 
 		return nil
@@ -99,75 +60,4 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-}
-
-func resolveOutputTargets(requested []string, outputsChanged bool, now time.Time) ([]string, string) {
-	runID := buildRunID(now)
-	if outputsChanged {
-		return append([]string(nil), requested...), runID
-	}
-
-	baseDir := filepath.Join("exports", "runs", runID)
-	return []string{
-		filepath.Join(baseDir, "results.json"),
-		filepath.Join(baseDir, "results.csv"),
-		filepath.Join(baseDir, "results.xlsx"),
-		defaultVisualizerOutput,
-	}, runID
-}
-
-func buildRunID(now time.Time) string {
-	return now.Format("20060102T150405.000000000-0700")
-}
-
-func buildExporters(outputTargets []string, runID string) []dag.Exporter {
-	var exporters []dag.Exporter
-	var visualizerTargets []string
-
-	rawDownloads := models.VisualizerDownloads{}
-
-	for _, out := range outputTargets {
-		switch strings.ToLower(filepath.Ext(out)) {
-		case ".json":
-			exporters = append(exporters, nodes.NewJSONExporter(out))
-			rawDownloads.JSON = out
-		case ".csv":
-			exporters = append(exporters, nodes.NewCSVExporter(out))
-			rawDownloads.CSV = out
-		case ".xlsx":
-			exporters = append(exporters, nodes.NewXLSXExporter(out))
-			rawDownloads.XLSX = out
-		case ".html":
-			visualizerTargets = append(visualizerTargets, out)
-		default:
-			log.Printf("Warning: unsupported output format for %s, skipping.", out)
-		}
-	}
-
-	for _, out := range visualizerTargets {
-		exporters = append(exporters, nodes.NewVisualizerExporter(out, runID, relativeDownloads(out, rawDownloads)))
-	}
-
-	return exporters
-}
-
-func relativeDownloads(htmlPath string, downloads models.VisualizerDownloads) models.VisualizerDownloads {
-	return models.VisualizerDownloads{
-		JSON: relativeOutputPath(htmlPath, downloads.JSON),
-		CSV:  relativeOutputPath(htmlPath, downloads.CSV),
-		XLSX: relativeOutputPath(htmlPath, downloads.XLSX),
-	}
-}
-
-func relativeOutputPath(fromFile, toFile string) string {
-	if toFile == "" {
-		return ""
-	}
-
-	rel, err := filepath.Rel(filepath.Dir(fromFile), toFile)
-	if err != nil {
-		return filepath.ToSlash(toFile)
-	}
-
-	return filepath.ToSlash(rel)
 }
