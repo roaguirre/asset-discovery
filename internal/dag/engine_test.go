@@ -287,6 +287,62 @@ func TestEngine_Run_DoesNotReconsiderAgainAfterExtraFrontier(t *testing.T) {
 	}
 }
 
+type ipProducingEnricher struct{}
+
+func (e *ipProducingEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	pCtx.Assets = append(pCtx.Assets, models.Asset{
+		ID:            "ip-1",
+		EnumerationID: "enum-1",
+		Type:          models.AssetTypeIP,
+		Identifier:    "203.0.113.10",
+		Source:        "domain_enricher",
+		IPDetails:     &models.IPDetails{},
+	})
+	return pCtx, nil
+}
+
+type ipObservingEnricher struct {
+	observed bool
+}
+
+func (e *ipObservingEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	for _, asset := range pCtx.Assets {
+		if asset.Type == models.AssetTypeIP && asset.Identifier == "203.0.113.10" {
+			e.observed = true
+			break
+		}
+	}
+	return pCtx, nil
+}
+
+func TestEngine_Run_LaterEnricherSeesAssetsAddedByEarlierEnricher(t *testing.T) {
+	observer := &ipObservingEnricher{}
+
+	engine := &dag.Engine{
+		Enrichers: []dag.Enricher{
+			&ipProducingEnricher{},
+			observer,
+		},
+	}
+
+	_, err := engine.Run(context.Background(), &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !observer.observed {
+		t.Fatalf("expected later enricher to observe IP assets appended by the earlier enricher")
+	}
+}
+
 type recordedSpan struct {
 	name  string
 	attrs map[string]interface{}

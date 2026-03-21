@@ -67,8 +67,8 @@ func TestNewPipeline_AssemblesRuntimeAndStages(t *testing.T) {
 	if len(pipeline.outputs) != 3 {
 		t.Fatalf("expected outputs to be preserved, got %v", pipeline.outputs)
 	}
-	if len(pipeline.engine.Collectors) != 10 {
-		t.Fatalf("expected 10 collectors, got %d", len(pipeline.engine.Collectors))
+	if len(pipeline.engine.Collectors) != 11 {
+		t.Fatalf("expected 11 collectors, got %d", len(pipeline.engine.Collectors))
 	}
 	if len(pipeline.engine.Enrichers) != 2 {
 		t.Fatalf("expected 2 enrichers, got %d", len(pipeline.engine.Enrichers))

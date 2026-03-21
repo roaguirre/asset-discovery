@@ -1380,8 +1380,10 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       "wayback_collector": "Historical hostnames recovered from the Internet Archive Wayback Machine CDX index.",
       "alienvault_collector": "Passive DNS observations from AlienVault OTX.",
       "web_hint_collector": "Ownership hints mined from the target website and security.txt references.",
+      "sitemap_collector": "Hosts and judged cross-root candidates discovered from robots.txt and sitemap documents.",
       "reverse_registration_collector": "Candidate sibling domains discovered through certificate transparency and RDAP overlap.",
-      "asn_cidr_collector": "PTR-derived domains and roots discovered by pivoting through known ASN and CIDR network ranges."
+      "asn_cidr_collector": "PTR-derived domains and roots discovered by pivoting through known ASN and CIDR network ranges.",
+      "domain_enricher": "DNS and RDAP enrichment backfill that also materializes IP assets from resolved A and AAAA records."
     });
 
     function parseHash() {

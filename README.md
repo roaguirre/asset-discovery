@@ -6,7 +6,7 @@ A robust, highly-concurrent Golang application for enterprise asset discovery.
 
 This project implements a Directed Acyclic Graph (DAG) for processing asset discovery. It takes "seeds" (e.g., Company Name, Domain, Address, Industry) and processes them through decoupled stages:
 1. **Collection**: Gathering raw data from OSINT sources and APIs.
-2. **Enrichment**: Augmenting the collected domains with DNS, IP, and provider data.
+2. **Enrichment**: Augmenting the collected domains with DNS, RDAP, IP, and provider data.
 3. **Filtering**: Removing false positives, dead domains, or out-of-scope assets.
 4. **Exporting**: Formatting the final dataset for consumption (JSON, CSV, DB).
 
@@ -38,11 +38,14 @@ Exports separate registrable domains from discovered subdomains. JSON stays as a
 The ownership-style pivots can use LLM judges instead of hardcoded brand and evidence-weight heuristics:
 
 - `web_hint_collector` for external anchor-link roots found on the homepage
+- `sitemap_collector` for cross-root hosts surfaced by robots.txt and sitemap documents
 - `crawler_collector` for outbound roots found while recursively crawling in-scope site pages
 - `reverse_registration_collector` for candidate domains discovered through CT and RDAP overlap
 - `asn_cidr_collector` and `ip_enricher` for PTR-derived registrable domains found from network pivots
 
-Deterministic parsing still extracts candidates from canonical tags, redirects, `security.txt`, internal page crawls, and external anchors. Cross-root ownership collection now stays judge-gated instead of promoting those roots directly.
+Deterministic parsing still extracts candidates from canonical tags, redirects, `security.txt`, sitemap documents, internal page crawls, and external anchors. Cross-root ownership collection now stays judge-gated instead of promoting those roots directly.
+
+The domain enricher now backfills `A`, `AAAA`, `CNAME`, `MX`, `TXT`, and missing RDAP metadata across discovered domain assets. When it observes fresh `A` or `AAAA` answers, it also materializes IP assets so the IP enricher can run against them in the same collection wave.
 
 When the ownership judge is enabled, the same configuration is also reused for the automatic post-run reconsideration pass. There is no separate CLI flag for this in v1.
 

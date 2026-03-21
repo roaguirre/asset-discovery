@@ -90,13 +90,19 @@ func NewPipeline(cfg Config) *Pipeline {
 				collect.WithCrawlerClient(fastClient),
 				collect.WithCrawlerJudge(ownershipJudge),
 			),
+			collect.NewSitemapCollector(
+				collect.WithSitemapClient(fastClient),
+				collect.WithSitemapJudge(ownershipJudge),
+			),
 			collect.NewWebHintCollector(
 				collect.WithWebHintClient(fastClient),
 				collect.WithWebHintJudge(webHintJudge),
 			),
 		},
 		Enrichers: []dag.Enricher{
-			enrich.NewDNSResolverEnricher(),
+			enrich.NewDomainEnricher(
+				enrich.WithDomainEnricherRDAPClient(dnsRDAPClient),
+			),
 			enrich.NewIPEnricher(enrich.WithIPEnricherJudge(ownershipJudge)),
 		},
 		Reconsiderers: []dag.Reconsiderer{
