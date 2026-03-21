@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -225,6 +227,75 @@ func TestSitemapCollector_RespectsJudgeCandidateCap(t *testing.T) {
 
 	if len(judge.seen) != 1 || len(judge.seen[0].Candidates) != 1 {
 		t.Fatalf("expected judge candidate cap to limit submissions, got %+v", judge.seen)
+	}
+}
+
+func TestSitemapCollector_PreservesCaseSensitiveRobotsSitemapURLs(t *testing.T) {
+	var sitemapHits int
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/robots.txt":
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprintf(w, "Sitemap: %s/CaseSensitive/Sitemap.XML?Sig=AbC\n", server.URL)
+		case "/CaseSensitive/Sitemap.XML":
+			if r.URL.RawQuery != "Sig=AbC" {
+				http.NotFound(w, r)
+				return
+			}
+			sitemapHits++
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><urlset><url><loc>https://api.example.com/login</loc></url></urlset>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	collector := NewSitemapCollector()
+	collector.client = server.Client()
+	collector.buildTargets = func(domain string) []sitemapFetchTarget {
+		return []sitemapFetchTarget{{URL: server.URL + "/robots.txt", Kind: "robots"}}
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}}},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if sitemapHits != 1 {
+		t.Fatalf("expected case-sensitive sitemap URL to be fetched exactly once, got %d", sitemapHits)
+	}
+	if !assetExists(pCtx.Assets, "api.example.com") {
+		t.Fatalf("expected case-sensitive sitemap document to produce assets, got %+v", pCtx.Assets)
+	}
+}
+
+func TestParseRobotsSitemapURLs_DedupesHostCaseOnly(t *testing.T) {
+	base, err := url.Parse("https://example.com/robots.txt")
+	if err != nil {
+		t.Fatalf("expected base URL to parse, got %v", err)
+	}
+
+	body := []byte(strings.Join([]string{
+		"Sitemap: https://EXAMPLE.com/sitemap.xml",
+		"Sitemap: https://example.com/sitemap.xml",
+		"Sitemap: https://example.com/CaseSensitive/Sitemap.XML?Sig=AbC",
+	}, "\n"))
+
+	got := parseRobotsSitemapURLs(body, base)
+	want := []string{
+		"https://EXAMPLE.com/sitemap.xml",
+		"https://example.com/CaseSensitive/Sitemap.XML?Sig=AbC",
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected host-only case duplicates to collapse while preserving path/query case, got %v want %v", got, want)
 	}
 }
 

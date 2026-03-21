@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultMaxPromptChars     = 32000
+	defaultMaxPromptChars     = 1200000
 	reconsiderationCollector  = "run_reconsideration"
 	reconsiderationScenario   = "post-run discarded candidate reconsideration"
 	reconsiderationSeedTag    = "post-run-reconsideration"
@@ -34,6 +34,8 @@ func WithDiscardedCandidateReconsidererJudge(judge ownership.Judge) Option {
 	}
 }
 
+// WithDiscardedCandidateReconsidererMaxPromptChars sets the max estimated
+// prompt size for each reconsideration request group.
 func WithDiscardedCandidateReconsidererMaxPromptChars(limit int) Option {
 	return func(r *DiscardedCandidateReconsiderer) {
 		r.maxPromptChars = limit
@@ -76,26 +78,28 @@ func (r *DiscardedCandidateReconsiderer) Process(ctx context.Context, pCtx *mode
 		return pCtx, nil
 	}
 
-	totalPromptChars := 0
 	totalCandidates := 0
 	for _, group := range requestGroups {
 		totalCandidates += len(group.request.Candidates)
-		totalPromptChars += ownership.EstimatePromptSize(group.request)
-	}
-
-	if r.maxPromptChars > 0 && totalPromptChars > r.maxPromptChars {
-		err := fmt.Errorf(
-			"post-run reconsideration skipped: prompt size %d exceeds limit %d",
-			totalPromptChars,
-			r.maxPromptChars,
-		)
-		appendPipelineError(pCtx, err)
-		telemetry.Infof(ctx, "[Discarded Candidate Reconsiderer] %v.", err)
-		return pCtx, nil
 	}
 
 	promoted := 0
+	skippedGroups := 0
 	for _, group := range requestGroups {
+		promptChars := ownership.EstimatePromptSize(group.request)
+		if r.maxPromptChars > 0 && promptChars > r.maxPromptChars {
+			err := fmt.Errorf(
+				"post-run reconsideration skipped request group %q: prompt size %d exceeds per-request limit %d",
+				groupLabel(group),
+				promptChars,
+				r.maxPromptChars,
+			)
+			appendPipelineError(pCtx, err)
+			telemetry.Infof(ctx, "[Discarded Candidate Reconsiderer] %v.", err)
+			skippedGroups++
+			continue
+		}
+
 		decisions, err := r.judge.EvaluateCandidates(ctx, group.request)
 		if err != nil {
 			appendPipelineError(pCtx, err)
@@ -143,10 +147,11 @@ func (r *DiscardedCandidateReconsiderer) Process(ctx context.Context, pCtx *mode
 
 	telemetry.Infof(
 		ctx,
-		"[Discarded Candidate Reconsiderer] Reviewed %d discarded candidates across %d parent seeds; promoted %d.",
+		"[Discarded Candidate Reconsiderer] Reviewed %d discarded candidates across %d parent seeds; promoted %d; skipped %d oversized request groups.",
 		totalCandidates,
 		len(requestGroups),
 		promoted,
+		skippedGroups,
 	)
 
 	return pCtx, nil
@@ -599,6 +604,20 @@ func domainsKey(domains []string) string {
 		return ""
 	}
 	return strings.Join(normalized, ",")
+}
+
+func groupLabel(group *requestGroup) string {
+	if group == nil {
+		return ""
+	}
+
+	if label := strings.TrimSpace(group.request.Seed.CompanyName); label != "" {
+		return label
+	}
+	if key := domainsKey(group.request.Seed.Domains); key != "" {
+		return key
+	}
+	return strings.TrimSpace(group.parentKey)
 }
 
 func filterAcceptedRoots(roots []string, current string) []string {

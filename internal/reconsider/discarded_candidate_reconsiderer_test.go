@@ -133,6 +133,115 @@ func TestDiscardedCandidateReconsiderer_SkipsOversizedPrompt(t *testing.T) {
 	}
 }
 
+func TestDiscardedCandidateReconsiderer_UsesPerRequestBudgetInsteadOfCombinedTotal(t *testing.T) {
+	judge := &stubOwnershipJudge{}
+	reconsiderer := NewDiscardedCandidateReconsiderer(
+		WithDiscardedCandidateReconsidererJudge(judge),
+	)
+
+	pCtx := multiSeedReconsiderationContext("", "")
+	pCtx.InitializeSeedFrontier(0)
+	pCtx.AdvanceSeedFrontier()
+	pCtx.ReserveExtraCollectionWave()
+
+	groups := requestGroupsForTest(pCtx)
+	if len(groups) != 2 {
+		t.Fatalf("expected two request groups, got %d", len(groups))
+	}
+
+	maxGroupSize := 0
+	totalGroupSize := 0
+	for _, group := range groups {
+		size := ownership.EstimatePromptSize(group.request)
+		totalGroupSize += size
+		if size > maxGroupSize {
+			maxGroupSize = size
+		}
+	}
+	if totalGroupSize <= maxGroupSize {
+		t.Fatalf("expected combined request size to exceed the largest individual group: total=%d max=%d", totalGroupSize, maxGroupSize)
+	}
+
+	reconsiderer.maxPromptChars = maxGroupSize
+
+	if _, err := reconsiderer.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected reconsiderer to succeed, got %v", err)
+	}
+
+	if len(judge.seen) != 2 {
+		t.Fatalf("expected both request groups to execute under the per-request budget, got %+v", judge.seen)
+	}
+}
+
+func TestDiscardedCandidateReconsiderer_SkipsOnlyOversizedGroup(t *testing.T) {
+	judge := &stubOwnershipJudge{}
+	reconsiderer := NewDiscardedCandidateReconsiderer(
+		WithDiscardedCandidateReconsidererJudge(judge),
+	)
+
+	pCtx := multiSeedReconsiderationContext("", strings.Repeat("x", 50000))
+	pCtx.InitializeSeedFrontier(0)
+	pCtx.AdvanceSeedFrontier()
+	pCtx.ReserveExtraCollectionWave()
+
+	groups := requestGroupsForTest(pCtx)
+	if len(groups) != 2 {
+		t.Fatalf("expected two request groups, got %d", len(groups))
+	}
+
+	smallest := ownership.EstimatePromptSize(groups[0].request)
+	largest := ownership.EstimatePromptSize(groups[1].request)
+	if largest < smallest {
+		smallest, largest = largest, smallest
+	}
+	if largest <= smallest {
+		t.Fatalf("expected one request group to be larger, got smallest=%d largest=%d", smallest, largest)
+	}
+
+	reconsiderer.maxPromptChars = smallest
+
+	if _, err := reconsiderer.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected reconsiderer to succeed, got %v", err)
+	}
+
+	if len(judge.seen) != 1 {
+		t.Fatalf("expected only the smaller request group to run, got %+v", judge.seen)
+	}
+	if len(pCtx.Errors) == 0 || !strings.Contains(pCtx.Errors[len(pCtx.Errors)-1].Error(), "per-request limit") {
+		t.Fatalf("expected oversized request group skip to be recorded, got %+v", pCtx.Errors)
+	}
+}
+
+func TestDiscardedCandidateReconsiderer_DefaultBudgetAllowsLargeSingleRequest(t *testing.T) {
+	judge := &stubOwnershipJudge{}
+	reconsiderer := NewDiscardedCandidateReconsiderer(
+		WithDiscardedCandidateReconsidererJudge(judge),
+	)
+
+	pCtx := multiSeedReconsiderationContext(strings.Repeat("x", 50000), "")
+	pCtx.Seeds = pCtx.Seeds[:1]
+	pCtx.JudgeEvaluations = pCtx.JudgeEvaluations[:1]
+	pCtx.InitializeSeedFrontier(0)
+	pCtx.AdvanceSeedFrontier()
+	pCtx.ReserveExtraCollectionWave()
+
+	groups := requestGroupsForTest(pCtx)
+	if len(groups) != 1 {
+		t.Fatalf("expected one request group, got %d", len(groups))
+	}
+	if size := ownership.EstimatePromptSize(groups[0].request); size <= 32000 {
+		t.Fatalf("expected request group to exceed the old default budget, got %d", size)
+	}
+
+	if _, err := reconsiderer.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected reconsiderer to succeed, got %v", err)
+	}
+
+	if len(judge.seen) != 1 {
+		t.Fatalf("expected large single request group to run under the new default budget, got %+v", judge.seen)
+	}
+}
+
 func TestDiscardedCandidateReconsiderer_LowConfidenceCollectDoesNotSuppressReconsideration(t *testing.T) {
 	judge := &stubOwnershipJudge{}
 	reconsiderer := NewDiscardedCandidateReconsiderer(
@@ -348,4 +457,61 @@ func hasJudgeEvaluation(evaluations []models.JudgeEvaluation, collector, root st
 		}
 	}
 	return false
+}
+
+func multiSeedReconsiderationContext(firstSupport string, secondSupport string) *models.PipelineContext {
+	if firstSupport == "" {
+		firstSupport = "Observed as a shared DNS target"
+	}
+	if secondSupport == "" {
+		secondSupport = "Observed as a shared MX root"
+	}
+
+	return &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+			{ID: "seed-2", CompanyName: "Second Corp", Domains: []string{"second.com"}},
+		},
+		JudgeEvaluations: []models.JudgeEvaluation{
+			{
+				Collector:   "dns_collector",
+				SeedID:      "seed-1",
+				SeedLabel:   "Example Corp",
+				SeedDomains: []string{"example.com"},
+				Scenario:    "dns root variant pivot",
+				Outcomes: []models.JudgeCandidateOutcome{
+					{
+						Root:     "example-store.com",
+						Collect:  false,
+						Explicit: true,
+						Support:  []string{firstSupport},
+					},
+				},
+			},
+			{
+				Collector:   "dns_collector",
+				SeedID:      "seed-2",
+				SeedLabel:   "Second Corp",
+				SeedDomains: []string{"second.com"},
+				Scenario:    "dns root variant pivot",
+				Outcomes: []models.JudgeCandidateOutcome{
+					{
+						Root:     "second-store.com",
+						Collect:  false,
+						Explicit: true,
+						Support:  []string{secondSupport},
+					},
+				},
+			},
+		},
+	}
+}
+
+func requestGroupsForTest(pCtx *models.PipelineContext) []*requestGroup {
+	seedIndex := buildSeedIndex(pCtx.Seeds)
+	knownRoots := buildKnownSeedRoots(pCtx.Seeds)
+	acceptedRoots := buildAcceptedRootSet(pCtx.JudgeEvaluations, seedIndex, knownRoots)
+	rootFacts := buildRunRootFacts(pCtx.Assets)
+	aggregates := aggregateDiscardedCandidates(pCtx.JudgeEvaluations, seedIndex, knownRoots, acceptedRoots)
+	return buildRequestGroups(aggregates, rootFacts, acceptedRoots, pCtx)
 }

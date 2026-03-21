@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -436,6 +437,7 @@ func (c *SitemapCollector) fetchURL(ctx context.Context, rawURL string) ([]byte,
 func parseRobotsSitemapURLs(body []byte, base *url.URL) []string {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	urls := make([]string, 0)
+	seen := make(map[string]struct{})
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -451,10 +453,15 @@ func parseRobotsSitemapURLs(body []byte, base *url.URL) []string {
 		if normalized == "" {
 			continue
 		}
+		key := sitemapURLDedupKey(normalized)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		urls = append(urls, normalized)
 	}
 
-	return discovery.UniqueLowerStrings(urls)
+	return urls
 }
 
 func parseSitemapXML(body []byte) (string, []string, error) {
@@ -527,6 +534,26 @@ func normalizeSitemapURL(raw string, base *url.URL) string {
 	}
 
 	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func sitemapURLDedupKey(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed == nil {
+		return raw
+	}
+
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" {
+		return raw
+	}
+	if port := parsed.Port(); port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else {
+		parsed.Host = host
+	}
+
 	return parsed.String()
 }
 
