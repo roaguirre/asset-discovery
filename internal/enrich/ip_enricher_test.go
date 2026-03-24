@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"asset-discovery/internal/models"
@@ -96,4 +97,28 @@ func seedHasDomain(seeds []models.Seed, domain string) bool {
 		}
 	}
 	return false
+}
+
+func TestCymruOriginQueryDomainIPv4(t *testing.T) {
+	query, ok := cymruOriginQueryDomain(net.ParseIP("104.21.52.57"))
+	if !ok {
+		t.Fatal("expected IPv4 query builder to succeed")
+	}
+
+	want := "57.52.21.104.origin.asn.cymru.com"
+	if query != want {
+		t.Fatalf("expected %q, got %q", want, query)
+	}
+}
+
+func TestCymruOriginQueryDomainIPv6(t *testing.T) {
+	query, ok := cymruOriginQueryDomain(net.ParseIP("2606:4700:3031::ac43:ad26"))
+	if !ok {
+		t.Fatal("expected IPv6 query builder to succeed")
+	}
+
+	want := "6.2.d.a.3.4.c.a.0.0.0.0.0.0.0.0.0.0.0.0.1.3.0.3.0.0.7.4.6.0.6.2.origin6.asn.cymru.com"
+	if query != want {
+		t.Fatalf("expected %q, got %q", want, query)
+	}
 }

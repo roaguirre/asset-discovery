@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strconv"
@@ -326,51 +327,65 @@ func enrichIP(asset *models.Asset) {
 	go func() {
 		defer wgEnrich.Done()
 
-		// Team Cymru expects the IP octets reversed for IPv4: 4.3.2.1.origin.asn.cymru.com
-		// Note: IPv6 uses .origin6.asn.cymru.com, but we'll focus on v4 format parsing for now
-		if parsedIP.To4() != nil {
-			octets := strings.Split(ipStr, ".")
-			if len(octets) != 4 {
-				return
-			}
+		queryDomain, ok := cymruOriginQueryDomain(parsedIP)
+		if !ok {
+			return
+		}
 
-			queryDomain := fmt.Sprintf("%s.%s.%s.%s.origin.asn.cymru.com", octets[3], octets[2], octets[1], octets[0])
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
+		txtRecords, err := net.DefaultResolver.LookupTXT(ctx, queryDomain)
+		if err != nil || len(txtRecords) == 0 {
+			return
+		}
 
-			txtRecords, err := net.DefaultResolver.LookupTXT(ctx, queryDomain)
-			if err == nil && len(txtRecords) > 0 {
-				// Format: "ASN | CIDR | CC | Registry | Allocated"
-				// e.g., "15169 | 108.177.123.0/24 | US | arin | 2013-05-23"
-				record := txtRecords[0]
-				parts := strings.Split(record, "|")
-				if len(parts) >= 1 {
-					asnStr := strings.TrimSpace(parts[0])
-					if asnID, err := strconv.Atoi(asnStr); err == nil {
-						asset.IPDetails.ASN = asnID
+		record := strings.Trim(txtRecords[0], "\"")
+		parts := strings.Split(record, "|")
+		if len(parts) >= 1 {
+			asnStr := strings.TrimSpace(parts[0])
+			if asnID, err := strconv.Atoi(asnStr); err == nil {
+				asset.IPDetails.ASN = asnID
 
-						// Now query the organization name using the ASN: AS15169.asn.cymru.com
-						orgQuery := fmt.Sprintf("AS%d.asn.cymru.com", asnID)
-						orgRecords, orgErr := net.DefaultResolver.LookupTXT(ctx, orgQuery)
-						if orgErr == nil && len(orgRecords) > 0 {
-							// Format: "15169 | US | arin | 2000-03-30 | GOOGLE, US"
-							orgParts := strings.Split(orgRecords[0], "|")
-							if len(orgParts) >= 5 {
-								asset.IPDetails.Organization = strings.TrimSpace(orgParts[4])
-							}
-						}
+				orgQuery := fmt.Sprintf("AS%d.asn.cymru.com", asnID)
+				orgRecords, orgErr := net.DefaultResolver.LookupTXT(ctx, orgQuery)
+				if orgErr == nil && len(orgRecords) > 0 {
+					orgParts := strings.Split(strings.Trim(orgRecords[0], "\""), "|")
+					if len(orgParts) >= 5 {
+						asset.IPDetails.Organization = strings.TrimSpace(orgParts[4])
 					}
 				}
-
-				// Optional: Grab CIDR routing info
-				if len(parts) >= 2 {
-					asset.EnrichmentData["cidr"] = strings.TrimSpace(parts[1])
-				}
 			}
+		}
+
+		if len(parts) >= 2 {
+			asset.EnrichmentData["cidr"] = strings.TrimSpace(parts[1])
 		}
 	}()
 
 	wgEnrich.Wait()
 	asset.EnrichmentData["enriched"] = true
+}
+
+func cymruOriginQueryDomain(parsedIP net.IP) (string, bool) {
+	if ipv4 := parsedIP.To4(); ipv4 != nil {
+		octets := strings.Split(ipv4.String(), ".")
+		if len(octets) != 4 {
+			return "", false
+		}
+		return fmt.Sprintf("%s.%s.%s.%s.origin.asn.cymru.com", octets[3], octets[2], octets[1], octets[0]), true
+	}
+
+	ipv6 := parsedIP.To16()
+	if ipv6 == nil {
+		return "", false
+	}
+
+	hexValue := hex.EncodeToString(ipv6)
+	nibbles := make([]string, 0, len(hexValue))
+	for i := len(hexValue) - 1; i >= 0; i-- {
+		nibbles = append(nibbles, string(hexValue[i]))
+	}
+
+	return strings.Join(nibbles, ".") + ".origin6.asn.cymru.com", true
 }

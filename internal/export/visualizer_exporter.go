@@ -2017,22 +2017,22 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         if (showDomains) {
         resultsHead.innerHTML = ` + "`" + `<tr>
           <th style="width:2.5rem"></th>
-          <th><button type="button" data-key="identifier">Identifier</button></th>
-          <th><button type="button" data-key="domain_kind">Kind</button></th>
-          <th><button type="button" data-key="source">Source</button></th>
-          <th><button type="button" data-key="status">Status</button></th>
-          <th><button type="button" data-key="discovery_date">Discovered</button></th>
+          <th><button type="button" data-key="identifier" data-tooltip="The domain or hostname identifier for this asset.">Identifier</button></th>
+          <th><button type="button" data-key="domain_kind" data-tooltip="Whether this domain is a registrable root or a discovered subdomain.">Kind</button></th>
+          <th><button type="button" data-key="source" data-tooltip="Collectors and enrichers that contributed this exported result.">Source</button></th>
+          <th><button type="button" data-key="status" data-tooltip="Merged enumeration status for the contributing discovery runs.">Status</button></th>
+          <th><button type="button" data-key="discovery_date" data-tooltip="When this result was first observed in the current exported run.">Discovered</button></th>
         </tr>` + "`" + `;
       } else if (showIPs) {
         resultsHead.innerHTML = ` + "`" + `<tr>
           <th style="width:2.5rem"></th>
-          <th><button type="button" data-key="identifier">Identifier</button></th>
-          <th><button type="button" data-key="asn">ASN</button></th>
-          <th><button type="button" data-key="organization">Organization</button></th>
-          <th><button type="button" data-key="ptr">PTR</button></th>
-          <th><button type="button" data-key="source">Source</button></th>
-          <th><button type="button" data-key="status">Status</button></th>
-          <th><button type="button" data-key="discovery_date">Discovered</button></th>
+          <th><button type="button" data-key="identifier" data-tooltip="The IP address identifier for this asset.">Identifier</button></th>
+          <th><button type="button" data-key="asn" data-tooltip="Autonomous System Number associated with this IP address.">ASN</button></th>
+          <th><button type="button" data-key="organization" data-tooltip="Organization name returned by the IP ownership enrichment lookup.">Organization</button></th>
+          <th><button type="button" data-key="ptr" data-tooltip="Reverse DNS hostname returned for this IP address, when one exists.">PTR</button></th>
+          <th><button type="button" data-key="source" data-tooltip="Collectors and enrichers that contributed this exported result.">Source</button></th>
+          <th><button type="button" data-key="status" data-tooltip="Merged enumeration status for the contributing discovery runs.">Status</button></th>
+          <th><button type="button" data-key="discovery_date" data-tooltip="When this result was first observed in the current exported run.">Discovered</button></th>
         </tr>` + "`" + `;
       }
       if (showResults) {
