@@ -1066,11 +1066,54 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
 
     .domain-group-toggle:hover { background: var(--accent-soft); }
 
+    .domain-group-controls {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.25rem;
+    }
+
     .domain-group-copy {
       display: inline-flex;
       align-items: center;
       flex-wrap: wrap;
       gap: 0.45rem;
+    }
+
+    .domain-summary-trigger,
+    .domain-child-trigger {
+      border: 0;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      padding: 0;
+      border-radius: 8px;
+      transition: color 140ms ease, background 140ms ease, transform 140ms ease;
+    }
+
+    .domain-summary-trigger:hover,
+    .domain-summary-trigger:focus-visible,
+    .domain-child-trigger:hover,
+    .domain-child-trigger:focus-visible {
+      color: var(--accent);
+      background: rgba(190, 106, 21, 0.08);
+      text-decoration: underline;
+      text-underline-offset: 0.16em;
+      outline: none;
+    }
+
+    .domain-child-row td:first-child {
+      padding-left: 1.65rem;
+    }
+
+    .domain-child-identifier {
+      display: inline-flex;
+      align-items: center;
+      padding-left: 0.9rem;
+      margin-left: 0.35rem;
+      border-left: 2px solid rgba(190, 106, 21, 0.22);
     }
 
     /* --- Expandable Detail Row --- */
@@ -2726,6 +2769,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           const expanded = isDomainGroupExpanded(group.key);
           const summaryRow = group.summaryRow || group.rows[0] || null;
           const childRows = group.rows.filter((row) => !summaryRow || row.asset_id !== summaryRow.asset_id);
+          const summaryExpanded = Boolean(summaryRow) && state.expandedRows.has(summaryRow.asset_id);
           const summaryDiscovered = summaryRow && summaryRow.discovery_date ? new Date(summaryRow.discovery_date).toLocaleString() : "";
           const summaryKind = summaryRow && summaryRow.domain_kind ? formatDomainKind(summaryRow.domain_kind) : "Domain";
           const summaryResolution = summaryRow ? formatResolutionStatus(summaryRow.resolution_status || "-") : "-";
@@ -2735,8 +2779,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           const groupTr = document.createElement("tr");
           groupTr.className = "domain-group-row";
           groupTr.innerHTML = [
-            "<td><button type=\"button\" class=\"domain-group-toggle\" data-domain-group=\"" + escapeHTML(group.key) + "\" aria-expanded=\"" + (expanded ? "true" : "false") + "\">" + (expanded ? "▼" : "▶") + "</button></td>",
-            "<td><div class=\"domain-group-summary\"><div class=\"domain-group-copy\"><strong>" + summaryIdentifier + "</strong><span class=\"pill\">" + group.rows.length + " asset" + (group.rows.length === 1 ? "" : "s") + "</span></div></div></td>",
+            "<td><div class=\"domain-group-controls\"><button type=\"button\" class=\"domain-group-toggle\" data-domain-group=\"" + escapeHTML(group.key) + "\" aria-expanded=\"" + (expanded ? "true" : "false") + "\">" + (expanded ? "▼" : "▶") + "</button></div></td>",
+            "<td><div class=\"domain-group-summary\"><div class=\"domain-group-copy\">" + (summaryRow ? "<button type=\"button\" class=\"domain-summary-trigger\" data-summary-asset-id=\"" + escapeHTML(summaryRow.asset_id) + "\" aria-expanded=\"" + (summaryExpanded ? "true" : "false") + "\"><strong>" + summaryIdentifier + "</strong></button>" : "<strong>" + summaryIdentifier + "</strong>") + "<span class=\"pill\">" + group.rows.length + " asset" + (group.rows.length === 1 ? "" : "s") + "</span></div></div></td>",
             "<td><span class=\"pill\">" + escapeHTML(summaryKind) + "</span></td>",
             "<td><span class=\"pill pill-subtle\">" + escapeHTML(summaryResolution) + "</span></td>",
             "<td>" + summarySource + "</td>",
@@ -2744,6 +2788,13 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
             "<td>" + escapeHTML(summaryDiscovered) + "</td>",
           ].join("");
           body.appendChild(groupTr);
+
+          if (summaryExpanded && summaryRow) {
+            const detailTr = document.createElement("tr");
+            detailTr.className = "detail-row";
+            detailTr.innerHTML = renderDetailPanel(summaryRow, run);
+            body.appendChild(detailTr);
+          }
 
           if (!expanded) {
             return;
@@ -2755,9 +2806,10 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
             const isExpanded = state.expandedRows.has(row.asset_id);
 
             const tr = document.createElement("tr");
+            tr.className = "domain-child-row";
             tr.innerHTML = [
-              "<td><button type=\"button\" class=\"detail-toggle\" data-asset-id=\"" + escapeHTML(row.asset_id) + "\">" + (isExpanded ? "▼" : "▶") + "</button></td>",
-              "<td><strong>" + escapeHTML(row.identifier) + "</strong></td>",
+              "<td></td>",
+              "<td><div class=\"domain-child-identifier\"><button type=\"button\" class=\"domain-child-trigger\" data-child-asset-id=\"" + escapeHTML(row.asset_id) + "\" aria-expanded=\"" + (isExpanded ? "true" : "false") + "\"><strong>" + escapeHTML(row.identifier) + "</strong></button></div></td>",
               "<td><span class=\"pill\">" + escapeHTML(kindLabel) + "</span></td>",
               "<td><span class=\"pill pill-subtle\">" + escapeHTML(formatResolutionStatus(row.resolution_status || "-")) + "</span></td>",
               "<td>" + renderSourceCell(row.source) + "</td>",
@@ -2899,9 +2951,9 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     });
 
     document.addEventListener("click", (event) => {
-      const toggle = event.target.closest(".detail-toggle");
+      const toggle = event.target.closest(".detail-toggle, .domain-summary-trigger, .domain-child-trigger");
       if (toggle) {
-        const assetId = toggle.dataset.assetId;
+        const assetId = toggle.dataset.assetId || toggle.dataset.summaryAssetId || toggle.dataset.childAssetId;
         if (state.expandedRows.has(assetId)) { state.expandedRows.delete(assetId); }
         else { state.expandedRows.add(assetId); }
         renderTable();
