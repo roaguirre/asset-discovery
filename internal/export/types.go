@@ -47,6 +47,9 @@ type Row struct {
 	AssetType         string    `json:"asset_type"`
 	DomainKind        string    `json:"domain_kind,omitempty"`
 	RegistrableDomain string    `json:"registrable_domain,omitempty"`
+	ASN               int       `json:"asn,omitempty"`
+	Organization      string    `json:"organization,omitempty"`
+	PTR               string    `json:"ptr,omitempty"`
 	Source            string    `json:"source"`
 	EnumerationID     string    `json:"enumeration_id"`
 	SeedID            string    `json:"seed_id"`

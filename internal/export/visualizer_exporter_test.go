@@ -130,8 +130,6 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		"run-2",
 		"api.example.com",
 		"app.example.com",
-		"Domain Kind",
-		"Registrable Domain",
 		"source-filter-options",
 		"splitSources",
 		"source-pill",
@@ -153,6 +151,12 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		"Discarded Candidates",
 		"facebook.com",
 		"example-store.com",
+		"detail-toggle",
+		"domain-group-row",
+		"judge-view-button",
+		"llm-summary",
+		"detail-panel",
+		"expandedRows",
 	} {
 		if !strings.Contains(html, needle) {
 			t.Fatalf("expected rendered HTML to contain %q", needle)
