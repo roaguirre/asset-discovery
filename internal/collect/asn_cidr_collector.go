@@ -231,8 +231,8 @@ func (c *ASNCIDRCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 	pCtx.Lock()
 	pCtx.Enumerations = append(pCtx.Enumerations, newEnums...)
 	pCtx.Errors = append(pCtx.Errors, newErrors...)
-	pCtx.Assets = append(pCtx.Assets, newAssets...)
 	pCtx.Unlock()
+	pCtx.AppendAssets(newAssets...)
 
 	return pCtx, nil
 }

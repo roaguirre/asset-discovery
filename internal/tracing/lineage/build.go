@@ -145,30 +145,55 @@ func BuildTracePath(runID, assetID string) string {
 	return "#trace/" + runID + "/" + assetID
 }
 
+func SummarizeObservationSources(observations []models.AssetObservation, fallback string) (string, string, string) {
+	all := summarizeObservationSourcesByKind(observations, "")
+	discovery := summarizeObservationSourcesByKind(observations, models.ObservationKindDiscovery)
+	enrichment := summarizeObservationSourcesByKind(observations, models.ObservationKindEnrichment)
+	if all == "" {
+		all = strings.TrimSpace(fallback)
+	}
+	if discovery == "" {
+		discovery = strings.TrimSpace(fallback)
+	}
+	return all, discovery, enrichment
+}
+
 func BuildTrace(
 	asset models.Asset,
 	domainKind string,
 	registrableDomain string,
 	contributors []TraceContributor,
+	observations []models.AssetObservation,
+	relations []models.AssetRelation,
 	enumByID map[string]models.Enumeration,
 	seedByID map[string]models.Seed,
 ) Trace {
+	allSources, discoverySources, enrichmentSources := SummarizeObservationSources(observations, asset.Source)
 	trace := Trace{
 		AssetID:           asset.ID,
 		Identifier:        asset.Identifier,
 		AssetType:         string(asset.Type),
-		Source:            asset.Source,
+		Source:            allSources,
+		DiscoveredBy:      discoverySources,
+		EnrichedBy:        enrichmentSources,
 		EnumerationID:     SummarizeContributorValues(contributors, func(item TraceContributor) string { return item.EnumerationID }),
 		SeedID:            SummarizeContributorValues(contributors, func(item TraceContributor) string { return item.SeedID }),
 		DomainKind:        domainKind,
 		RegistrableDomain: registrableDomain,
+		ResolutionStatus:  string(models.DomainResolutionStatusForAsset(asset)),
 		Contributors:      contributors,
 	}
 
 	identityItems := []string{
 		"Asset ID: " + asset.ID,
 		"Asset type: " + string(asset.Type),
-		"Collected from: " + asset.Source,
+		"Contributors: " + allSources,
+	}
+	if discoverySources != "" {
+		identityItems = append(identityItems, "Discovered by: "+discoverySources)
+	}
+	if enrichmentSources != "" {
+		identityItems = append(identityItems, "Enriched by: "+enrichmentSources)
 	}
 	if len(contributors) > 1 {
 		identityItems = append(identityItems, fmt.Sprintf("Merged contributors: %d", len(contributors)))
@@ -181,6 +206,9 @@ func BuildTrace(
 	}
 	if registrableDomain != "" {
 		identityItems = append(identityItems, "Registrable domain: "+registrableDomain)
+	}
+	if trace.ResolutionStatus != "" {
+		identityItems = append(identityItems, "DNS resolution: "+formatTraceLabel(trace.ResolutionStatus))
 	}
 	trace.Sections = appendTraceSection(trace.Sections, "Result", identityItems)
 
@@ -235,6 +263,7 @@ func BuildTrace(
 	trace.Sections = appendTraceSection(trace.Sections, "Domain Evidence", buildDomainTraceItems(asset))
 	trace.Sections = appendTraceSection(trace.Sections, "Network Evidence", buildIPTraceItems(asset))
 	trace.Sections = appendTraceSection(trace.Sections, "Enrichment", buildEnrichmentTraceItems(asset.EnrichmentData))
+	trace.RootNodeID, trace.Nodes = buildTraceNodes(asset, allSources, trace.Sections, contributors, observations, relations, enumByID, seedByID)
 
 	return trace
 }
@@ -276,6 +305,187 @@ func BuildTraceContributors(asset models.Asset, enumByID map[string]models.Enume
 	}
 
 	return contributors
+}
+
+func buildTraceNodes(
+	asset models.Asset,
+	allSources string,
+	sections []TraceSection,
+	contributors []TraceContributor,
+	observations []models.AssetObservation,
+	relations []models.AssetRelation,
+	enumByID map[string]models.Enumeration,
+	seedByID map[string]models.Seed,
+) (string, []TraceNode) {
+	rootID := "asset:" + asset.ID
+	rootDetails := append([]TraceSection(nil), sections...)
+	rootDetails = append(rootDetails, TraceSection{
+		Title: "Ownership",
+		Items: compactTraceValues(
+			"Ownership state: "+string(asset.OwnershipState),
+			"Inclusion reason: "+asset.InclusionReason,
+		),
+	})
+	nodes := []TraceNode{
+		{
+			ID:            rootID,
+			Kind:          "asset",
+			Label:         asset.Identifier,
+			Subtitle:      string(asset.Type),
+			Badges:        compactTraceValues(string(asset.OwnershipState), allSources),
+			LinkedAssetID: asset.ID,
+			Details:       rootDetails,
+		},
+	}
+
+	if len(observations) > 0 {
+		groupID := rootID + ":observations"
+		nodes = append(nodes, TraceNode{
+			ID:            groupID,
+			ParentID:      rootID,
+			Kind:          "group",
+			Label:         "Observations",
+			Subtitle:      fmt.Sprintf("%d supporting observations", len(observations)),
+			LinkedAssetID: asset.ID,
+		})
+		sort.SliceStable(observations, func(i, j int) bool {
+			if observations[i].DiscoveryDate.Equal(observations[j].DiscoveryDate) {
+				return observations[i].ID < observations[j].ID
+			}
+			if observations[i].DiscoveryDate.IsZero() {
+				return false
+			}
+			if observations[j].DiscoveryDate.IsZero() {
+				return true
+			}
+			return observations[i].DiscoveryDate.Before(observations[j].DiscoveryDate)
+		})
+		for _, observation := range observations {
+			nodes = append(nodes, TraceNode{
+				ID:                  "obs:" + observation.ID,
+				ParentID:            groupID,
+				Kind:                "observation",
+				Label:               observation.Source,
+				Subtitle:            observation.Identifier,
+				Badges:              compactTraceValues(formatTraceLabel(string(observation.Kind)), FormatDateTime(observation.DiscoveryDate), string(observation.OwnershipState)),
+				LinkedAssetID:       observation.AssetID,
+				LinkedObservationID: observation.ID,
+				Details:             buildObservationTraceDetails(observation, enumByID, seedByID),
+			})
+		}
+	}
+
+	if len(contributors) > 0 {
+		groupID := rootID + ":seeds"
+		nodes = append(nodes, TraceNode{
+			ID:            groupID,
+			ParentID:      rootID,
+			Kind:          "group",
+			Label:         "Seed Context",
+			Subtitle:      fmt.Sprintf("%d contributing seeds", len(uniqueTraceContributorValues(contributors, func(item TraceContributor) string { return item.SeedID }))),
+			LinkedAssetID: asset.ID,
+		})
+		for _, contributor := range contributors {
+			seed := seedByID[contributor.SeedID]
+			nodes = append(nodes, TraceNode{
+				ID:            "seed:" + contributor.SeedID + ":" + contributor.AssetID,
+				ParentID:      groupID,
+				Kind:          "seed",
+				Label:         contributor.SeedLabel,
+				Subtitle:      contributor.SeedID,
+				Badges:        compactTraceValues(strings.Join(seed.Domains, ", "), FormatDateTime(contributor.DiscoveryDate)),
+				LinkedAssetID: asset.ID,
+				Details: []TraceSection{
+					{Title: "Seed", Items: compactTraceValues("Seed ID: "+contributor.SeedID, "Domains: "+strings.Join(seed.Domains, ", "), "Source: "+contributor.Source)},
+					{Title: "Evidence", Items: formatSeedEvidence(seed.Evidence)},
+				},
+			})
+		}
+	}
+
+	if len(relations) > 0 {
+		groupID := rootID + ":relations"
+		nodes = append(nodes, TraceNode{
+			ID:            groupID,
+			ParentID:      rootID,
+			Kind:          "group",
+			Label:         "Relations",
+			Subtitle:      fmt.Sprintf("%d linked discovery edges", len(relations)),
+			LinkedAssetID: asset.ID,
+		})
+		sort.SliceStable(relations, func(i, j int) bool {
+			if relations[i].DiscoveryDate.Equal(relations[j].DiscoveryDate) {
+				return relations[i].ID < relations[j].ID
+			}
+			if relations[i].DiscoveryDate.IsZero() {
+				return false
+			}
+			if relations[j].DiscoveryDate.IsZero() {
+				return true
+			}
+			return relations[i].DiscoveryDate.Before(relations[j].DiscoveryDate)
+		})
+		for _, relation := range relations {
+			label := relation.Label
+			if label == "" {
+				label = relation.Kind
+			}
+			peer := relation.ToIdentifier
+			if relation.FromAssetID == asset.ID {
+				peer = relation.ToIdentifier
+			} else if relation.ToAssetID == asset.ID {
+				peer = relation.FromIdentifier
+			}
+			nodes = append(nodes, TraceNode{
+				ID:               "rel:" + relation.ID,
+				ParentID:         groupID,
+				Kind:             "relation",
+				Label:            label,
+				Subtitle:         peer,
+				Badges:           compactTraceValues(relation.Kind, relation.Source, FormatDateTime(relation.DiscoveryDate)),
+				LinkedAssetID:    asset.ID,
+				LinkedRelationID: relation.ID,
+				Details: []TraceSection{
+					{Title: "Relation", Items: compactTraceValues("Kind: "+relation.Kind, "Source: "+relation.Source, "Reason: "+relation.Reason)},
+					{Title: "Endpoints", Items: compactTraceValues("From: "+relation.FromIdentifier, "To: "+relation.ToIdentifier, "Enumeration: "+relation.EnumerationID)},
+				},
+			})
+		}
+	}
+
+	if len(asset.EnrichmentStates) > 0 || len(asset.EnrichmentData) > 0 {
+		groupID := rootID + ":enrichment"
+		nodes = append(nodes, TraceNode{
+			ID:            groupID,
+			ParentID:      rootID,
+			Kind:          "group",
+			Label:         "Enrichment",
+			Subtitle:      "Runtime cache and enrichment results",
+			LinkedAssetID: asset.ID,
+		})
+		stateKeys := make([]string, 0, len(asset.EnrichmentStates))
+		for key := range asset.EnrichmentStates {
+			stateKeys = append(stateKeys, key)
+		}
+		sort.Strings(stateKeys)
+		for _, key := range stateKeys {
+			state := asset.EnrichmentStates[key]
+			nodes = append(nodes, TraceNode{
+				ID:            "enrich:" + asset.ID + ":" + key,
+				ParentID:      groupID,
+				Kind:          "enrichment",
+				Label:         key,
+				Subtitle:      state.Status,
+				Badges:        compactTraceValues(fmt.Sprintf("cached=%t", state.Cached), FormatDateTime(state.UpdatedAt)),
+				LinkedAssetID: asset.ID,
+				Details: []TraceSection{
+					{Title: "Enrichment State", Items: compactTraceValues("Stage: "+key, "Status: "+state.Status, fmt.Sprintf("Cached: %t", state.Cached), "Error: "+state.Error)},
+				},
+			})
+		}
+	}
+
+	return rootID, nodes
 }
 
 func SummarizeContributorValues(contributors []TraceContributor, value func(TraceContributor) string) string {
@@ -419,6 +629,79 @@ func buildMergedSeedTraceItems(contributors []TraceContributor, seedByID map[str
 	return items
 }
 
+func buildObservationTraceDetails(observation models.AssetObservation, enumByID map[string]models.Enumeration, seedByID map[string]models.Seed) []TraceSection {
+	sections := []TraceSection{
+		{
+			Title: "Observation",
+			Items: compactTraceValues(
+				"Observation ID: "+observation.ID,
+				"Kind: "+string(observation.Kind),
+				"Type: "+string(observation.Type),
+				"Identifier: "+observation.Identifier,
+				"Source: "+observation.Source,
+				"Discovered at: "+FormatDateTime(observation.DiscoveryDate),
+				"Ownership state: "+string(observation.OwnershipState),
+				"Inclusion reason: "+observation.InclusionReason,
+			),
+		},
+	}
+
+	if enum := enumByID[observation.EnumerationID]; enum.ID != "" {
+		seed := seedByID[enum.SeedID]
+		sections = append(sections, TraceSection{
+			Title: "Enumeration",
+			Items: compactTraceValues(
+				"Enumeration ID: "+enum.ID,
+				"Status: "+enum.Status,
+				"Seed ID: "+enum.SeedID,
+				"Seed domains: "+strings.Join(seed.Domains, ", "),
+			),
+		})
+	}
+
+	if observation.DomainDetails != nil {
+		domainAsset := models.Asset{
+			Type:             models.AssetTypeDomain,
+			Identifier:       observation.Identifier,
+			DomainDetails:    observation.DomainDetails,
+			EnrichmentStates: observation.EnrichmentStates,
+		}
+		sections = appendTraceSection(sections, "Domain Evidence", buildDomainTraceItems(domainAsset))
+	}
+	if observation.IPDetails != nil {
+		ipAsset := models.Asset{
+			Type:       models.AssetTypeIP,
+			Identifier: observation.Identifier,
+			IPDetails:  observation.IPDetails,
+		}
+		sections = appendTraceSection(sections, "Network Evidence", buildIPTraceItems(ipAsset))
+	}
+	if len(observation.EnrichmentData) > 0 {
+		sections = appendTraceSection(sections, "Enrichment", buildEnrichmentTraceItems(observation.EnrichmentData))
+	}
+	if len(observation.EnrichmentStates) > 0 {
+		stateKeys := make([]string, 0, len(observation.EnrichmentStates))
+		for key := range observation.EnrichmentStates {
+			stateKeys = append(stateKeys, key)
+		}
+		sort.Strings(stateKeys)
+		stateItems := make([]string, 0, len(stateKeys))
+		for _, key := range stateKeys {
+			state := observation.EnrichmentStates[key]
+			stateItems = append(stateItems, compactTraceValues(
+				"Stage: "+key,
+				"Status: "+state.Status,
+				fmt.Sprintf("Cached: %t", state.Cached),
+				"Updated at: "+FormatDateTime(state.UpdatedAt),
+				"Error: "+state.Error,
+			)...)
+		}
+		sections = appendTraceSection(sections, "Enrichment State", stateItems)
+	}
+
+	return sections
+}
+
 func uniqueTraceContributorValues(contributors []TraceContributor, value func(TraceContributor) string) []string {
 	out := make([]string, 0, len(contributors))
 	seen := make(map[string]struct{}, len(contributors))
@@ -459,6 +742,18 @@ func appendTraceSection(sections []TraceSection, title string, items []string) [
 	})
 }
 
+func compactTraceValues(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.HasSuffix(value, ":") {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
 func formatSeedEvidence(evidence []models.SeedEvidence) []string {
 	items := make([]string, 0, len(evidence))
 	for _, item := range evidence {
@@ -488,10 +783,16 @@ func formatSeedEvidence(evidence []models.SeedEvidence) []string {
 
 func buildDomainTraceItems(asset models.Asset) []string {
 	if asset.DomainDetails == nil {
+		if resolution := models.DomainResolutionStatusForAsset(asset); resolution != "" {
+			return []string{"DNS resolution: " + formatTraceLabel(string(resolution))}
+		}
 		return nil
 	}
 
 	items := make([]string, 0, 8)
+	if resolution := models.DomainResolutionStatusForAsset(asset); resolution != "" {
+		items = append(items, "DNS resolution: "+formatTraceLabel(string(resolution)))
+	}
 	if len(asset.DomainDetails.Records) > 0 {
 		recordParts := make([]string, 0, len(asset.DomainDetails.Records))
 		for _, record := range asset.DomainDetails.Records {
@@ -507,8 +808,17 @@ func buildDomainTraceItems(asset models.Asset) []string {
 		if rdap.RegistrarName != "" {
 			items = append(items, "Registrar: "+rdap.RegistrarName)
 		}
+		if rdap.RegistrarURL != "" {
+			items = append(items, "Registrar URL: "+rdap.RegistrarURL)
+		}
+		if rdap.RegistrantName != "" {
+			items = append(items, "Registrant name: "+rdap.RegistrantName)
+		}
 		if rdap.RegistrantOrg != "" {
 			items = append(items, "Registrant org: "+rdap.RegistrantOrg)
+		}
+		if rdap.RegistrantEmail != "" {
+			items = append(items, "Registrant email: "+rdap.RegistrantEmail)
 		}
 		if len(rdap.NameServers) > 0 {
 			items = append(items, "Nameservers: "+strings.Join(rdap.NameServers, ", "))
@@ -516,8 +826,14 @@ func buildDomainTraceItems(asset models.Asset) []string {
 		if !rdap.CreationDate.IsZero() {
 			items = append(items, "Registration created: "+rdap.CreationDate.Format("2006-01-02"))
 		}
+		if !rdap.UpdatedDate.IsZero() {
+			items = append(items, "Registration updated: "+rdap.UpdatedDate.Format("2006-01-02"))
+		}
 		if !rdap.ExpirationDate.IsZero() {
 			items = append(items, "Registration expires: "+rdap.ExpirationDate.Format("2006-01-02"))
+		}
+		if len(rdap.Statuses) > 0 {
+			items = append(items, "Registration status: "+strings.Join(rdap.Statuses, ", "))
 		}
 	}
 
@@ -580,4 +896,25 @@ func formatEnrichmentValue(value interface{}) string {
 
 func formatTraceLabel(value string) string {
 	return strings.ReplaceAll(value, "_", " ")
+}
+
+func summarizeObservationSourcesByKind(observations []models.AssetObservation, kind models.ObservationKind) string {
+	values := make([]string, 0, len(observations))
+	seen := make(map[string]struct{}, len(observations))
+	for _, observation := range observations {
+		if kind != "" && observation.Kind != kind {
+			continue
+		}
+		source := strings.TrimSpace(strings.ToLower(observation.Source))
+		if source == "" {
+			continue
+		}
+		if _, exists := seen[source]; exists {
+			continue
+		}
+		seen[source] = struct{}{}
+		values = append(values, source)
+	}
+	sort.Strings(values)
+	return strings.Join(values, ", ")
 }

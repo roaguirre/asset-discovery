@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -135,9 +136,26 @@ func LookupDomain(ctx context.Context, client *http.Client, domain string) (*mod
 }
 
 func lookupDomainWHOIS(ctx context.Context, domain string) (*models.RDAPData, error) {
-	return lookupDomainWHOISWith(ctx, domain, func(domain string) (string, error) {
+	data, err := lookupDomainWHOISWith(ctx, domain, func(domain string) (string, error) {
 		return whois.Whois(domain)
 	}, whoisparser.Parse)
+	if err == nil {
+		return data, nil
+	}
+
+	systemData, systemErr := lookupDomainWHOISViaSystem(ctx, domain)
+	if systemErr == nil {
+		return systemData, nil
+	}
+
+	if errors.Is(err, ErrUnsupportedRegistrationData) {
+		return nil, systemErr
+	}
+	if errors.Is(systemErr, ErrUnsupportedRegistrationData) {
+		return nil, err
+	}
+
+	return nil, systemErr
 }
 
 func lookupDomainWHOISWith(ctx context.Context, domain string, lookup func(string) (string, error), parse func(string) (whoisparser.WhoisInfo, error)) (*models.RDAPData, error) {
@@ -151,41 +169,7 @@ func lookupDomainWHOISWith(ctx context.Context, domain string, lookup func(strin
 		return nil, ErrUnsupportedRegistrationData
 	}
 
-	data := &models.RDAPData{}
-
-	if parsed.Domain != nil {
-		data.Statuses = discovery.UniqueLowerStrings(parsed.Domain.Status)
-		data.NameServers = discovery.UniqueLowerStrings(parsed.Domain.NameServers)
-
-		if parsed.Domain.CreatedDateInTime != nil {
-			data.CreationDate = *parsed.Domain.CreatedDateInTime
-		} else if parsed.Domain.CreatedDate != "" {
-			data.CreationDate = parseLooseTime(parsed.Domain.CreatedDate)
-		}
-		if parsed.Domain.ExpirationDateInTime != nil {
-			data.ExpirationDate = *parsed.Domain.ExpirationDateInTime
-		} else if parsed.Domain.ExpirationDate != "" {
-			data.ExpirationDate = parseLooseTime(parsed.Domain.ExpirationDate)
-		}
-		if parsed.Domain.UpdatedDateInTime != nil {
-			data.UpdatedDate = *parsed.Domain.UpdatedDateInTime
-		} else if parsed.Domain.UpdatedDate != "" {
-			data.UpdatedDate = parseLooseTime(parsed.Domain.UpdatedDate)
-		}
-	}
-
-	if parsed.Registrar != nil {
-		data.RegistrarName = strings.TrimSpace(parsed.Registrar.Name)
-		data.RegistrarIANAID = strings.TrimSpace(parsed.Registrar.ID)
-	}
-
-	if parsed.Registrant != nil {
-		data.RegistrantName = strings.TrimSpace(parsed.Registrant.Name)
-		data.RegistrantEmail = strings.TrimSpace(parsed.Registrant.Email)
-		data.RegistrantOrg = strings.TrimSpace(parsed.Registrant.Organization)
-	}
-
-	return data, nil
+	return rdapDataFromWhoisInfo(parsed), nil
 }
 
 func retryWHOISLookup(ctx context.Context, domain string, lookup func(string) (string, error)) (string, error) {
@@ -349,6 +333,8 @@ func parseLooseTime(value string) time.Time {
 	layouts := []string{
 		time.RFC3339,
 		"2006-01-02T15:04:05Z",
+		"2006-01-02 15:04:05 MST",
+		"2006-01-02 15:04:05 -0700",
 		"2006-01-02 15:04:05",
 		"2006-01-02",
 	}
@@ -358,4 +344,268 @@ func parseLooseTime(value string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func rdapDataFromWhoisInfo(parsed whoisparser.WhoisInfo) *models.RDAPData {
+	data := &models.RDAPData{}
+
+	if parsed.Domain != nil {
+		data.Statuses = discovery.UniqueLowerStrings(parsed.Domain.Status)
+		data.NameServers = discovery.UniqueLowerStrings(parsed.Domain.NameServers)
+
+		if parsed.Domain.CreatedDateInTime != nil {
+			data.CreationDate = *parsed.Domain.CreatedDateInTime
+		} else if parsed.Domain.CreatedDate != "" {
+			data.CreationDate = parseLooseTime(parsed.Domain.CreatedDate)
+		}
+		if parsed.Domain.ExpirationDateInTime != nil {
+			data.ExpirationDate = *parsed.Domain.ExpirationDateInTime
+		} else if parsed.Domain.ExpirationDate != "" {
+			data.ExpirationDate = parseLooseTime(parsed.Domain.ExpirationDate)
+		}
+		if parsed.Domain.UpdatedDateInTime != nil {
+			data.UpdatedDate = *parsed.Domain.UpdatedDateInTime
+		} else if parsed.Domain.UpdatedDate != "" {
+			data.UpdatedDate = parseLooseTime(parsed.Domain.UpdatedDate)
+		}
+	}
+
+	if parsed.Registrar != nil {
+		data.RegistrarName = strings.TrimSpace(parsed.Registrar.Name)
+		data.RegistrarIANAID = strings.TrimSpace(parsed.Registrar.ID)
+		data.RegistrarURL = strings.TrimSpace(parsed.Registrar.ReferralURL)
+	}
+
+	if parsed.Registrant != nil {
+		data.RegistrantName = strings.TrimSpace(parsed.Registrant.Name)
+		data.RegistrantEmail = strings.TrimSpace(parsed.Registrant.Email)
+		data.RegistrantOrg = strings.TrimSpace(parsed.Registrant.Organization)
+	}
+
+	return data
+}
+
+func lookupDomainWHOISViaSystem(ctx context.Context, domain string) (*models.RDAPData, error) {
+	return lookupDomainWHOISViaSystemWith(ctx, domain, runSystemWHOIS, whoisparser.Parse)
+}
+
+func lookupDomainWHOISViaSystemWith(
+	ctx context.Context,
+	domain string,
+	run func(context.Context, ...string) (string, error),
+	parse func(string) (whoisparser.WhoisInfo, error),
+) (*models.RDAPData, error) {
+	args := systemWHOISArgsForDomain(domain)
+	raw, err := retrySystemWHOISLookup(ctx, func(lookupCtx context.Context) (string, error) {
+		return run(lookupCtx, args...)
+	})
+	if err != nil && strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("system WHOIS lookup failed for %s: %w", domain, err)
+	}
+
+	var data *models.RDAPData
+	if parsed, parseErr := parse(raw); parseErr == nil {
+		data = rdapDataFromWhoisInfo(parsed)
+	}
+
+	if custom, customErr := parseCustomWHOIS(domain, raw); customErr == nil {
+		if data == nil {
+			data = custom
+		} else {
+			mergeRDAPData(data, custom)
+		}
+	}
+
+	if data != nil {
+		return data, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("system WHOIS lookup failed for %s: %w", domain, err)
+	}
+	return nil, ErrUnsupportedRegistrationData
+}
+
+func retrySystemWHOISLookup(ctx context.Context, run func(context.Context) (string, error)) (string, error) {
+	backoff := whoisInitialBackoff
+	var lastErr error
+
+	for attempt := 1; attempt <= whoisMaxAttempts; attempt++ {
+		if ctx != nil && ctx.Err() != nil {
+			if lastErr != nil {
+				return "", lastErr
+			}
+			return "", ctx.Err()
+		}
+
+		raw, err := run(ctx)
+		if err == nil || strings.TrimSpace(raw) != "" {
+			return raw, err
+		}
+
+		lastErr = err
+		if attempt == whoisMaxAttempts || !shouldRetryWHOISError(ctx, err) {
+			break
+		}
+
+		wait := backoff
+		if wait <= 0 {
+			wait = 100 * time.Millisecond
+		}
+		if wait > whoisMaxBackoff {
+			wait = whoisMaxBackoff
+		}
+
+		timer := time.NewTimer(wait)
+		if ctx == nil {
+			<-timer.C
+		} else {
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return "", ctx.Err()
+			}
+		}
+
+		if backoff <= 0 {
+			backoff = 100 * time.Millisecond
+		} else {
+			backoff *= 2
+			if backoff > whoisMaxBackoff {
+				backoff = whoisMaxBackoff
+			}
+		}
+	}
+
+	return "", lastErr
+}
+
+func runSystemWHOIS(ctx context.Context, args ...string) (string, error) {
+	binary, err := exec.LookPath("whois")
+	if err != nil {
+		return "", err
+	}
+	output, runErr := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	return string(output), runErr
+}
+
+func systemWHOISArgsForDomain(domain string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(domain))
+	if strings.HasSuffix(normalized, ".cl") {
+		return []string{"-h", "whois.nic.cl", normalized}
+	}
+	return []string{normalized}
+}
+
+func parseCustomWHOIS(domain, raw string) (*models.RDAPData, error) {
+	normalized := strings.ToLower(strings.TrimSpace(domain))
+	if strings.HasSuffix(normalized, ".cl") {
+		return parseNICChileWHOIS(raw)
+	}
+	return nil, ErrUnsupportedRegistrationData
+}
+
+func parseNICChileWHOIS(raw string) (*models.RDAPData, error) {
+	data := &models.RDAPData{}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "%") {
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+
+		switch key {
+		case "registrant name":
+			if data.RegistrantName == "" {
+				data.RegistrantName = value
+			}
+		case "registrant organisation":
+			if data.RegistrantOrg == "" {
+				data.RegistrantOrg = value
+			}
+		case "registrant email":
+			if data.RegistrantEmail == "" {
+				data.RegistrantEmail = strings.ToLower(value)
+			}
+		case "registrar name":
+			if data.RegistrarName == "" {
+				data.RegistrarName = value
+			}
+		case "registrar url":
+			if data.RegistrarURL == "" {
+				data.RegistrarURL = value
+			}
+		case "creation date":
+			if data.CreationDate.IsZero() {
+				data.CreationDate = parseLooseTime(value)
+			}
+		case "expiration date":
+			if data.ExpirationDate.IsZero() {
+				data.ExpirationDate = parseLooseTime(value)
+			}
+		case "updated date", "last updated date", "modified date":
+			if data.UpdatedDate.IsZero() {
+				data.UpdatedDate = parseLooseTime(value)
+			}
+		case "status", "domain status":
+			data.Statuses = append(data.Statuses, value)
+		case "name server":
+			if normalized := discovery.NormalizeDomainIdentifier(value); normalized != "" {
+				data.NameServers = append(data.NameServers, normalized)
+			}
+		}
+	}
+
+	data.NameServers = discovery.UniqueLowerStrings(data.NameServers)
+	data.Statuses = discovery.UniqueLowerStrings(data.Statuses)
+	if data.RegistrarName == "" && data.RegistrarURL == "" && data.RegistrantName == "" && data.RegistrantEmail == "" && data.RegistrantOrg == "" && len(data.NameServers) == 0 && len(data.Statuses) == 0 && data.CreationDate.IsZero() && data.ExpirationDate.IsZero() && data.UpdatedDate.IsZero() {
+		return nil, ErrUnsupportedRegistrationData
+	}
+
+	return data, nil
+}
+
+func mergeRDAPData(existing, incoming *models.RDAPData) {
+	if existing == nil || incoming == nil {
+		return
+	}
+
+	if existing.RegistrarName == "" {
+		existing.RegistrarName = incoming.RegistrarName
+	}
+	if existing.RegistrarIANAID == "" {
+		existing.RegistrarIANAID = incoming.RegistrarIANAID
+	}
+	if existing.RegistrarURL == "" {
+		existing.RegistrarURL = incoming.RegistrarURL
+	}
+	if existing.CreationDate.IsZero() {
+		existing.CreationDate = incoming.CreationDate
+	}
+	if existing.ExpirationDate.IsZero() {
+		existing.ExpirationDate = incoming.ExpirationDate
+	}
+	if existing.UpdatedDate.IsZero() {
+		existing.UpdatedDate = incoming.UpdatedDate
+	}
+	if existing.RegistrantName == "" {
+		existing.RegistrantName = incoming.RegistrantName
+	}
+	if existing.RegistrantEmail == "" {
+		existing.RegistrantEmail = incoming.RegistrantEmail
+	}
+	if existing.RegistrantOrg == "" {
+		existing.RegistrantOrg = incoming.RegistrantOrg
+	}
+
+	existing.Statuses = discovery.UniqueLowerStrings(append(existing.Statuses, incoming.Statuses...))
+	existing.NameServers = discovery.UniqueLowerStrings(append(existing.NameServers, incoming.NameServers...))
 }

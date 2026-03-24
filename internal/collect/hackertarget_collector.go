@@ -143,8 +143,8 @@ func (c *HackerTargetCollector) Process(ctx context.Context, pCtx *models.Pipeli
 	pCtx.Lock()
 	pCtx.Enumerations = append(pCtx.Enumerations, newEnums...)
 	pCtx.Errors = append(pCtx.Errors, newErrors...)
-	pCtx.Assets = append(pCtx.Assets, newAssets...)
 	pCtx.Unlock()
+	pCtx.AppendAssets(newAssets...)
 
 	return pCtx, nil
 }

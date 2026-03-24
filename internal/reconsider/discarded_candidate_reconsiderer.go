@@ -59,6 +59,9 @@ func NewDiscardedCandidateReconsiderer(options ...Option) *DiscardedCandidateRec
 
 func (r *DiscardedCandidateReconsiderer) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	telemetry.Info(ctx, "[Discarded Candidate Reconsiderer] Reviewing discarded candidates...")
+	if pCtx != nil {
+		pCtx.EnsureAssetState()
+	}
 
 	if pCtx == nil || r.judge == nil || len(pCtx.JudgeEvaluations) == 0 {
 		return pCtx, nil

@@ -26,6 +26,7 @@ func NewJSONExporter(filepath string) *JSONExporter {
 }
 
 func (e *JSONExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	pCtx.EnsureAssetState()
 	telemetry.Infof(ctx, "[JSON Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
 	markEnumerationsCompleted(pCtx, time.Now())
 
@@ -60,6 +61,7 @@ func NewCSVExporter(filepath string) *CSVExporter {
 }
 
 func (e *CSVExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	pCtx.EnsureAssetState()
 	telemetry.Infof(ctx, "[CSV Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
 	markEnumerationsCompleted(pCtx, time.Now())
 
@@ -112,6 +114,7 @@ func NewXLSXExporter(filepath string) *XLSXExporter {
 }
 
 func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	pCtx.EnsureAssetState()
 	telemetry.Infof(ctx, "[XLSX Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
 	markEnumerationsCompleted(pCtx, time.Now())
 

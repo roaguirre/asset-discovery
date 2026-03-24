@@ -26,6 +26,11 @@ type Downloads struct {
 	XLSX string `json:"xlsx,omitempty"`
 }
 
+type EvidenceGroup struct {
+	Title string   `json:"title"`
+	Items []string `json:"items,omitempty"`
+}
+
 type RunSummary struct {
 	ID               string    `json:"id"`
 	Label            string    `json:"label"`
@@ -42,21 +47,27 @@ type Manifest struct {
 }
 
 type Row struct {
-	AssetID           string    `json:"asset_id"`
-	Identifier        string    `json:"identifier"`
-	AssetType         string    `json:"asset_type"`
-	DomainKind        string    `json:"domain_kind,omitempty"`
-	RegistrableDomain string    `json:"registrable_domain,omitempty"`
-	ASN               int       `json:"asn,omitempty"`
-	Organization      string    `json:"organization,omitempty"`
-	PTR               string    `json:"ptr,omitempty"`
-	Source            string    `json:"source"`
-	EnumerationID     string    `json:"enumeration_id"`
-	SeedID            string    `json:"seed_id"`
-	Status            string    `json:"status"`
-	DiscoveryDate     time.Time `json:"discovery_date,omitempty"`
-	Details           string    `json:"details,omitempty"`
-	TracePath         string    `json:"trace_path,omitempty"`
+	AssetID           string          `json:"asset_id"`
+	Identifier        string          `json:"identifier"`
+	AssetType         string          `json:"asset_type"`
+	DomainKind        string          `json:"domain_kind,omitempty"`
+	RegistrableDomain string          `json:"registrable_domain,omitempty"`
+	ResolutionStatus  string          `json:"resolution_status,omitempty"`
+	OwnershipState    string          `json:"ownership_state,omitempty"`
+	InclusionReason   string          `json:"inclusion_reason,omitempty"`
+	ASN               int             `json:"asn,omitempty"`
+	Organization      string          `json:"organization,omitempty"`
+	PTR               string          `json:"ptr,omitempty"`
+	Source            string          `json:"source"`
+	DiscoveredBy      string          `json:"discovered_by,omitempty"`
+	EnrichedBy        string          `json:"enriched_by,omitempty"`
+	EnumerationID     string          `json:"enumeration_id"`
+	SeedID            string          `json:"seed_id"`
+	Status            string          `json:"status"`
+	DiscoveryDate     time.Time       `json:"discovery_date,omitempty"`
+	Details           string          `json:"details,omitempty"`
+	EvidenceGroups    []EvidenceGroup `json:"evidence_groups,omitempty"`
+	TracePath         string          `json:"trace_path,omitempty"`
 }
 
 type Run struct {

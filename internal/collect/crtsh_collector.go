@@ -150,8 +150,8 @@ func (c *CrtShCollector) Process(ctx context.Context, pCtx *models.PipelineConte
 	pCtx.Lock()
 	pCtx.Enumerations = append(pCtx.Enumerations, newEnums...)
 	pCtx.Errors = append(pCtx.Errors, newErrors...)
-	pCtx.Assets = append(pCtx.Assets, newAssets...)
 	pCtx.Unlock()
+	pCtx.AppendAssets(newAssets...)
 
 	return pCtx, nil
 }

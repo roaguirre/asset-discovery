@@ -5,10 +5,18 @@ A robust, highly-concurrent Golang application for enterprise asset discovery.
 ## Overview
 
 This project implements a Directed Acyclic Graph (DAG) for processing asset discovery. It takes "seeds" (e.g., Company Name, Domain, Address, Industry) and processes them through decoupled stages:
-1. **Collection**: Gathering raw data from OSINT sources and APIs.
-2. **Enrichment**: Augmenting the collected domains with DNS, RDAP, IP, and provider data.
-3. **Filtering**: Removing false positives, dead domains, or out-of-scope assets.
-4. **Exporting**: Formatting the final dataset for consumption (JSON, CSV, DB).
+1. **Collection**: Gathering raw data from OSINT sources and APIs and emitting raw observations plus discovery relations.
+2. **Enrichment**: Augmenting canonical domain and IP assets with DNS, RDAP, PTR, ASN, organization, and provider data.
+3. **Filtering / Validation**: Validating the canonical runtime graph and applying downstream scope policy.
+4. **Exporting**: Formatting the canonical asset set plus its provenance graph for JSON, CSV, XLSX, and the visualizer.
+
+Runtime state now uses a hybrid model instead of one overloaded asset stream:
+
+- `PipelineContext.Assets` holds canonical assets keyed by `(type, identifier)`.
+- `PipelineContext.Observations` preserves raw per-stage emissions for provenance.
+- `PipelineContext.Relations` stores discovery edges such as `dns_a`, `dns_aaaa`, `dns_ns`, `ptr`, `web_hint`, `crawl_link`, and judge promotions.
+
+That split lets repeated sightings across collection waves add provenance without forcing repeat enrichment lookups or producing duplicate final rows.
 
 If enrichment discovers new seeds, the engine can schedule a later follow-up collection wave using only that new frontier. This preserves acyclic stage execution inside each wave while still expanding coverage across public asset pivots.
 
@@ -33,6 +41,30 @@ When `--outputs` is omitted, each run is archived under `exports/runs/<run-id>/`
 
 Exports separate registrable domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `registrable_domain` metadata, CSV includes `Domain Kind` and `Registrable Domain` columns, XLSX uses dedicated `Registrable Domains` and `Subdomains` sheets, and the visualizer exposes the same split as sortable/filterable columns.
 
+Canonical assets also carry:
+
+- `ownership_state`: `owned`, `associated_infrastructure`, or `uncertain`
+- `inclusion_reason`: a short explanation of why the asset is present in the final dataset
+
+The visualizer uses those fields directly in the browse tables and trace view so questionable infrastructure can be shown and explained instead of silently merged into "owned" assets.
+
+## Visualizer
+
+The visualizer now has two modes:
+
+- **Browse views** for domains and IPs with compact inline summaries and an `Open Trace` action.
+- **Trace workspace** at `#trace/<run-id>/<asset-id>` with a left trace tree and a right detail panel.
+
+Each trace is rooted at the canonical asset and can include:
+
+- contributing observations
+- seed and enumeration context
+- discovery relations between assets
+- enrichment-state snapshots
+- related assets in the same run
+
+This is meant to answer "why is this asset here?" without dumping every merged detail inline in the main results table.
+
 ### Optional LLM Judging For Ownership Decisions
 
 The ownership-style pivots can use LLM judges instead of hardcoded brand and evidence-weight heuristics:
@@ -46,6 +78,8 @@ The ownership-style pivots can use LLM judges instead of hardcoded brand and evi
 Deterministic parsing still extracts candidates from canonical tags, redirects, `security.txt`, sitemap documents, internal page crawls, and external anchors. Cross-root ownership collection now stays judge-gated instead of promoting those roots directly.
 
 The domain enricher now backfills `A`, `AAAA`, `CNAME`, `MX`, `TXT`, and missing RDAP metadata across discovered domain assets. When it observes fresh `A` or `AAAA` answers, it also materializes IP assets so the IP enricher can run against them in the same collection wave.
+
+The IP enricher performs PTR lookups and ASN / organization enrichment for both IPv4 and IPv6 through Team Cymru DNS pivots. It caches results per canonical IP for the current run, so a later collector wave can reuse the cached enrichment while still attaching new contributor provenance.
 
 When the ownership judge is enabled, the same configuration is also reused for the automatic post-run reconsideration pass. There is no separate CLI flag for this in v1.
 

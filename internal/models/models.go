@@ -88,13 +88,16 @@ const (
 // Filtering processes will evaluate records (e.g., checking if CNAMEs point to known SaaS providers)
 // to determine true relevance and scope.
 type Asset struct {
-	ID            string            `json:"id"`
-	EnumerationID string            `json:"enumeration_id"` // Links the asset to a specific enumeration run.
-	Type          AssetType         `json:"type"`           // e.g., "domain", "ip"
-	Identifier    string            `json:"identifier"`     // e.g., "api.google.com" or "192.168.1.100"
-	Source        string            `json:"source"`         // Where was this found? (e.g., "dns_collector", "subfinder")
-	DiscoveryDate time.Time         `json:"discovery_date"`
-	Provenance    []AssetProvenance `json:"provenance,omitempty"`
+	ID               string                     `json:"id"`
+	EnumerationID    string                     `json:"enumeration_id"` // Links the asset to a specific enumeration run.
+	Type             AssetType                  `json:"type"`           // e.g., "domain", "ip"
+	Identifier       string                     `json:"identifier"`     // e.g., "api.google.com" or "192.168.1.100"
+	Source           string                     `json:"source"`         // Where was this found? (e.g., "dns_collector", "subfinder")
+	DiscoveryDate    time.Time                  `json:"discovery_date"`
+	Provenance       []AssetProvenance          `json:"provenance,omitempty"`
+	OwnershipState   OwnershipState             `json:"ownership_state,omitempty"`
+	InclusionReason  string                     `json:"inclusion_reason,omitempty"`
+	EnrichmentStates map[string]EnrichmentState `json:"enrichment_states,omitempty"`
 
 	// Type-specific details. Only the relevant struct will be populated.
 	DomainDetails *DomainDetails `json:"domain_details,omitempty"`
@@ -112,10 +115,76 @@ type AssetProvenance struct {
 	DiscoveryDate time.Time `json:"discovery_date,omitempty"`
 }
 
+type OwnershipState string
+
+const (
+	OwnershipStateOwned                    OwnershipState = "owned"
+	OwnershipStateAssociatedInfrastructure OwnershipState = "associated_infrastructure"
+	OwnershipStateUncertain                OwnershipState = "uncertain"
+)
+
+type EnrichmentState struct {
+	Status    string    `json:"status,omitempty"`
+	Cached    bool      `json:"cached,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Error     string    `json:"error,omitempty"`
+}
+
+type DomainResolutionStatus string
+
+const (
+	DomainResolutionStatusResolved     DomainResolutionStatus = "resolved"
+	DomainResolutionStatusUnresolved   DomainResolutionStatus = "unresolved"
+	DomainResolutionStatusLookupFailed DomainResolutionStatus = "lookup_failed"
+	DomainResolutionStatusNotChecked   DomainResolutionStatus = "not_checked"
+)
+
+type ObservationKind string
+
+const (
+	ObservationKindDiscovery  ObservationKind = "discovery"
+	ObservationKindEnrichment ObservationKind = "enrichment"
+)
+
+type AssetObservation struct {
+	Kind             ObservationKind            `json:"kind,omitempty"`
+	ID               string                     `json:"id"`
+	AssetID          string                     `json:"asset_id,omitempty"`
+	EnumerationID    string                     `json:"enumeration_id,omitempty"`
+	Type             AssetType                  `json:"type"`
+	Identifier       string                     `json:"identifier"`
+	Source           string                     `json:"source,omitempty"`
+	DiscoveryDate    time.Time                  `json:"discovery_date,omitempty"`
+	OwnershipState   OwnershipState             `json:"ownership_state,omitempty"`
+	InclusionReason  string                     `json:"inclusion_reason,omitempty"`
+	DomainDetails    *DomainDetails             `json:"domain_details,omitempty"`
+	IPDetails        *IPDetails                 `json:"ip_details,omitempty"`
+	EnrichmentData   map[string]interface{}     `json:"enrichment_data,omitempty"`
+	EnrichmentStates map[string]EnrichmentState `json:"enrichment_states,omitempty"`
+}
+
+type AssetRelation struct {
+	ID             string    `json:"id"`
+	FromAssetID    string    `json:"from_asset_id,omitempty"`
+	FromAssetType  AssetType `json:"from_asset_type,omitempty"`
+	FromIdentifier string    `json:"from_identifier,omitempty"`
+	ToAssetID      string    `json:"to_asset_id,omitempty"`
+	ToAssetType    AssetType `json:"to_asset_type,omitempty"`
+	ToIdentifier   string    `json:"to_identifier,omitempty"`
+	ObservationID  string    `json:"observation_id,omitempty"`
+	EnumerationID  string    `json:"enumeration_id,omitempty"`
+	Source         string    `json:"source,omitempty"`
+	Kind           string    `json:"kind,omitempty"`
+	Label          string    `json:"label,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	DiscoveryDate  time.Time `json:"discovery_date,omitempty"`
+}
+
 // RDAPData represents domain registration data from the RDAP protocol.
 type RDAPData struct {
 	RegistrarName   string    `json:"registrar_name,omitempty"`
 	RegistrarIANAID string    `json:"registrar_iana_id,omitempty"`
+	RegistrarURL    string    `json:"registrar_url,omitempty"`
 	CreationDate    time.Time `json:"creation_date,omitempty"`
 	ExpirationDate  time.Time `json:"expiration_date,omitempty"`
 	UpdatedDate     time.Time `json:"updated_date,omitempty"`
@@ -146,6 +215,8 @@ type PipelineContext struct {
 	Seeds            []Seed
 	Enumerations     []Enumeration
 	Assets           []Asset
+	Observations     []AssetObservation
+	Relations        []AssetRelation
 	Errors           []error
 	JudgeEvaluations []JudgeEvaluation
 
@@ -157,6 +228,10 @@ type PipelineContext struct {
 	maxCollectionDepth            int
 	extraCollectionWaveReserved   bool
 	extraCollectionWaveInProgress bool
+	assetStateInitialized         bool
+	assetIndexByKey               map[string]int
+	observationIndexByID          map[string]int
+	relationIndexByKey            map[string]int
 }
 
 type seedCandidate struct {

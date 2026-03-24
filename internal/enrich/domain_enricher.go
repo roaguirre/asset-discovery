@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -40,6 +41,8 @@ type domainEnrichmentResult struct {
 	identifier string
 	cache      cachedDomainEnrichment
 	errors     []error
+	cached     bool
+	retryable  bool
 }
 
 type DomainEnricher struct {
@@ -55,7 +58,6 @@ type DomainEnricher struct {
 	now            func() time.Time
 	mu             sync.Mutex
 	cache          map[string]cachedDomainEnrichment
-	enrichedAssets map[string]struct{}
 	emittedIPKeys  map[string]struct{}
 	lastContext    *models.PipelineContext
 }
@@ -90,7 +92,6 @@ func NewDomainEnricher(options ...DomainEnricherOption) *DomainEnricher {
 		maxConcurrency: defaultDomainEnrichConcurrency,
 		now:            time.Now,
 		cache:          make(map[string]cachedDomainEnrichment),
-		enrichedAssets: make(map[string]struct{}),
 		emittedIPKeys:  make(map[string]struct{}),
 	}
 
@@ -109,6 +110,7 @@ func NewDomainEnricher(options ...DomainEnricherOption) *DomainEnricher {
 
 func (e *DomainEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	telemetry.Info(ctx, "[Domain Enricher] Enriching domain assets...")
+	pCtx.EnsureAssetState()
 	e.ensureRunState(pCtx)
 
 	assetIndexesByIdentifier := make(map[string][]int)
@@ -122,16 +124,15 @@ func (e *DomainEnricher) Process(ctx context.Context, pCtx *models.PipelineConte
 			if identifier == "" {
 				continue
 			}
-			if e.assetAlreadyEnriched(asset) {
-				continue
-			}
 			assetIndexesByIdentifier[identifier] = append(assetIndexesByIdentifier[identifier], i)
 
 			if identifier == discovery.RegistrableDomain(identifier) && (asset.DomainDetails == nil || asset.DomainDetails.RDAP == nil) {
 				needsRDAP[identifier] = true
 			}
 		case models.AssetTypeIP:
-			e.seedEmittedIP(asset.EnumerationID, asset.Identifier)
+			for _, enumerationID := range assetContributorEnumerationIDs(*asset) {
+				e.seedEmittedIP(enumerationID, asset.Identifier)
+			}
 		}
 	}
 
@@ -146,12 +147,16 @@ func (e *DomainEnricher) Process(ctx context.Context, pCtx *models.PipelineConte
 	}
 	sort.Strings(identifiers)
 
-	readyResults := make(map[string]cachedDomainEnrichment, len(identifiers))
+	readyResults := make(map[string]domainEnrichmentResult, len(identifiers))
 	identifiersToLookup := make([]string, 0, len(identifiers))
 	for _, identifier := range identifiers {
 		entry, exists := e.cachedEntry(identifier)
 		if exists && entry.dnsDone && (!needsRDAP[identifier] || entry.rdapDone) {
-			readyResults[identifier] = entry
+			readyResults[identifier] = domainEnrichmentResult{
+				identifier: identifier,
+				cache:      entry,
+				cached:     true,
+			}
 			continue
 		}
 		identifiersToLookup = append(identifiersToLookup, identifier)
@@ -184,11 +189,13 @@ func (e *DomainEnricher) Process(ctx context.Context, pCtx *models.PipelineConte
 
 	var newErrors []error
 	var newIPAssets []models.Asset
+	var newRelations []models.AssetRelation
+	var enrichmentObservations []models.AssetObservation
 
 	for result := range results {
 		newErrors = append(newErrors, result.errors...)
 		e.storeCachedEntry(result.identifier, result.cache)
-		readyResults[result.identifier] = result.cache
+		readyResults[result.identifier] = result
 	}
 
 	for _, identifier := range identifiers {
@@ -200,6 +207,7 @@ func (e *DomainEnricher) Process(ctx context.Context, pCtx *models.PipelineConte
 		indexes := assetIndexesByIdentifier[identifier]
 		for _, index := range indexes {
 			asset := &pCtx.Assets[index]
+			shouldRecordObservation := shouldRecordDomainEnrichmentObservation(*asset)
 			if asset.DomainDetails == nil {
 				asset.DomainDetails = &models.DomainDetails{}
 			}
@@ -207,35 +215,96 @@ func (e *DomainEnricher) Process(ctx context.Context, pCtx *models.PipelineConte
 				asset.EnrichmentData = make(map[string]interface{})
 			}
 
-			asset.DomainDetails.Records = mergeDomainRecords(asset.DomainDetails.Records, result.records)
-			if result.rdap != nil && identifier == discovery.RegistrableDomain(identifier) && asset.DomainDetails.RDAP == nil {
-				asset.DomainDetails.RDAP = cloneRDAPData(result.rdap)
+			asset.DomainDetails.Records = mergeDomainRecords(asset.DomainDetails.Records, result.cache.records)
+			if result.cache.rdap != nil && identifier == discovery.RegistrableDomain(identifier) && asset.DomainDetails.RDAP == nil {
+				asset.DomainDetails.RDAP = cloneRDAPData(result.cache.rdap)
 			}
 			asset.EnrichmentData["enriched"] = true
-			e.markAssetEnriched(asset)
+			if asset.EnrichmentStates == nil {
+				asset.EnrichmentStates = make(map[string]models.EnrichmentState)
+			}
+			stageState := models.EnrichmentState{UpdatedAt: e.now()}
+			switch {
+			case result.cached:
+				stageState.Status = "cached"
+				stageState.Cached = true
+			case result.retryable:
+				stageState.Status = "retryable"
+				stageState.Error = joinEnrichmentErrors(result.errors)
+			default:
+				stageState.Status = "completed"
+			}
+			asset.EnrichmentStates["domain_enricher"] = stageState
 
-			for _, ip := range result.ips {
-				if !e.claimEmittedIP(asset.EnumerationID, ip) {
-					continue
-				}
-
-				newIPAssets = append(newIPAssets, models.Asset{
-					ID:            models.NewID("ip-domain-enricher"),
-					EnumerationID: asset.EnumerationID,
-					Type:          models.AssetTypeIP,
-					Identifier:    ip,
-					Source:        "domain_enricher",
-					DiscoveryDate: e.now(),
-					IPDetails:     &models.IPDetails{},
+			if shouldRecordObservation {
+				enrichmentObservations = append(enrichmentObservations, models.AssetObservation{
+					ID:               models.NewID("obs-domain-enricher"),
+					Kind:             models.ObservationKindEnrichment,
+					AssetID:          asset.ID,
+					EnumerationID:    asset.EnumerationID,
+					Type:             asset.Type,
+					Identifier:       asset.Identifier,
+					Source:           "domain_enricher",
+					DiscoveryDate:    e.now(),
+					DomainDetails:    asset.DomainDetails,
+					EnrichmentData:   asset.EnrichmentData,
+					EnrichmentStates: map[string]models.EnrichmentState{"domain_enricher": stageState},
 				})
+			}
+
+			relationKindsByIP := domainIPRelationKinds(result.cache.records)
+			for _, enumerationID := range assetContributorEnumerationIDs(*asset) {
+				for _, ip := range result.cache.ips {
+					if !e.claimEmittedIP(enumerationID, ip) {
+						continue
+					}
+
+					relationKinds := relationKindsByIP[ip]
+					if len(relationKinds) == 0 {
+						relationKinds = []string{"dns_a"}
+					}
+					inclusionReason := "Resolved from " + asset.Identifier + " via " + strings.ToUpper(strings.TrimPrefix(relationKinds[0], "dns_"))
+					observationID := models.NewID("ip-domain-enricher")
+					newIPAssets = append(newIPAssets, models.Asset{
+						ID:              observationID,
+						EnumerationID:   enumerationID,
+						Type:            models.AssetTypeIP,
+						Identifier:      ip,
+						Source:          "domain_enricher",
+						DiscoveryDate:   e.now(),
+						OwnershipState:  models.OwnershipStateAssociatedInfrastructure,
+						InclusionReason: inclusionReason,
+						IPDetails:       &models.IPDetails{},
+					})
+
+					for _, relationKind := range relationKinds {
+						newRelations = append(newRelations, models.AssetRelation{
+							ID:             models.NewID("rel-domain-ip"),
+							FromAssetID:    asset.ID,
+							FromAssetType:  models.AssetTypeDomain,
+							FromIdentifier: asset.Identifier,
+							ToAssetType:    models.AssetTypeIP,
+							ToIdentifier:   ip,
+							ObservationID:  observationID,
+							EnumerationID:  enumerationID,
+							Source:         "domain_enricher",
+							Kind:           relationKind,
+							Label:          "Resolved IP",
+							Reason:         inclusionReason,
+							DiscoveryDate:  e.now(),
+						})
+					}
+				}
 			}
 		}
 	}
 
 	pCtx.Lock()
 	pCtx.Errors = append(pCtx.Errors, newErrors...)
-	pCtx.Assets = append(pCtx.Assets, newIPAssets...)
 	pCtx.Unlock()
+	pCtx.AppendAssetObservations(enrichmentObservations...)
+	pCtx.AppendAssets(newIPAssets...)
+	pCtx.AppendAssetRelations(newRelations...)
 
 	return pCtx, nil
 }
@@ -243,17 +312,28 @@ func (e *DomainEnricher) Process(ctx context.Context, pCtx *models.PipelineConte
 func (e *DomainEnricher) enrichDomain(ctx context.Context, identifier string, wantRDAP bool) domainEnrichmentResult {
 	result := domainEnrichmentResult{identifier: identifier}
 	cacheEntry, _ := e.cachedEntry(identifier)
+	if cacheEntry.dnsDone && (!wantRDAP || cacheEntry.rdapDone) {
+		result.cache = cacheEntry
+		result.cached = true
+		return result
+	}
 
-	addLookupError := func(kind string, err error) {
+	addLookupError := func(kind string, err error) bool {
 		if err == nil {
-			return
+			return false
+		}
+		if isTerminalDNSLookupError(err) {
+			return false
 		}
 		result.errors = append(result.errors, fmt.Errorf("domain_enricher lookup %s %s: %w", kind, identifier, err))
+		return true
 	}
 
 	if !cacheEntry.dnsDone {
+		dnsRetryable := false
+
 		ipv4, err := e.lookupIPsWithTimeout(ctx, "ip4", identifier)
-		addLookupError("A", err)
+		dnsRetryable = addLookupError("A", err) || dnsRetryable
 		for _, ip := range ipv4 {
 			value := ip.String()
 			if value == "" {
@@ -264,7 +344,7 @@ func (e *DomainEnricher) enrichDomain(ctx context.Context, identifier string, wa
 		}
 
 		ipv6, err := e.lookupIPsWithTimeout(ctx, "ip6", identifier)
-		addLookupError("AAAA", err)
+		dnsRetryable = addLookupError("AAAA", err) || dnsRetryable
 		for _, ip := range ipv6 {
 			value := ip.String()
 			if value == "" {
@@ -275,14 +355,14 @@ func (e *DomainEnricher) enrichDomain(ctx context.Context, identifier string, wa
 		}
 
 		cname, err := e.lookupCNAMEWithTimeout(ctx, identifier)
-		addLookupError("CNAME", err)
+		dnsRetryable = addLookupError("CNAME", err) || dnsRetryable
 		cname = discovery.NormalizeDomainIdentifier(cname)
 		if cname != "" && cname != identifier {
 			cacheEntry.records = append(cacheEntry.records, models.DNSRecord{Type: "CNAME", Value: cname})
 		}
 
 		mxs, err := e.lookupMXWithTimeout(ctx, identifier)
-		addLookupError("MX", err)
+		dnsRetryable = addLookupError("MX", err) || dnsRetryable
 		for _, mx := range mxs {
 			host := discovery.NormalizeDomainIdentifier(mx.Host)
 			if host == "" {
@@ -292,7 +372,7 @@ func (e *DomainEnricher) enrichDomain(ctx context.Context, identifier string, wa
 		}
 
 		txts, err := e.lookupTXTWithTimeout(ctx, identifier)
-		addLookupError("TXT", err)
+		dnsRetryable = addLookupError("TXT", err) || dnsRetryable
 		for _, txt := range txts {
 			txt = strings.TrimSpace(txt)
 			if txt == "" {
@@ -301,23 +381,71 @@ func (e *DomainEnricher) enrichDomain(ctx context.Context, identifier string, wa
 			cacheEntry.records = append(cacheEntry.records, models.DNSRecord{Type: "TXT", Value: txt})
 		}
 
-		cacheEntry.dnsDone = true
+		cacheEntry.dnsDone = !dnsRetryable
+		result.retryable = dnsRetryable
 	}
 
 	if wantRDAP && !cacheEntry.rdapDone {
 		rdap, err := e.lookupRDAPWithTimeout(ctx, identifier)
-		if err != nil && err != registration.ErrUnsupportedRegistrationData {
-			result.errors = append(result.errors, fmt.Errorf("domain_enricher lookup RDAP %s: %w", identifier, err))
-		} else if err == nil {
+		switch {
+		case err == nil:
 			cacheEntry.rdap = cloneRDAPData(rdap)
+			cacheEntry.rdapDone = true
+		case err == registration.ErrUnsupportedRegistrationData:
+			cacheEntry.rdapDone = true
+		default:
+			result.errors = append(result.errors, fmt.Errorf("domain_enricher lookup RDAP %s: %w", identifier, err))
+			result.retryable = true
 		}
-		cacheEntry.rdapDone = true
 	}
 
 	cacheEntry.records = uniqueDomainRecords(cacheEntry.records)
 	cacheEntry.ips = discovery.UniqueLowerStrings(cacheEntry.ips)
 	result.cache = cacheEntry
 	return result
+}
+
+func isTerminalDNSLookupError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		if dnsErr.IsNotFound {
+			return true
+		}
+		if !dnsErr.IsTemporary && !dnsErr.IsTimeout && strings.Contains(strings.ToLower(dnsErr.Err), "no such host") {
+			return true
+		}
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "no such host")
+}
+
+func joinEnrichmentErrors(errs []error) string {
+	if len(errs) == 0 {
+		return ""
+	}
+
+	values := make([]string, 0, len(errs))
+	seen := make(map[string]struct{}, len(errs))
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		value := strings.TrimSpace(err.Error())
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+
+	return strings.Join(values, " | ")
 }
 
 func (e *DomainEnricher) lookupIPsWithTimeout(ctx context.Context, network string, host string) ([]net.IP, error) {
@@ -441,7 +569,6 @@ func (e *DomainEnricher) ensureRunState(pCtx *models.PipelineContext) {
 
 	e.lastContext = pCtx
 	e.cache = make(map[string]cachedDomainEnrichment)
-	e.enrichedAssets = make(map[string]struct{})
 	e.emittedIPKeys = make(map[string]struct{})
 }
 
@@ -450,31 +577,6 @@ func (e *DomainEnricher) storeCachedEntry(identifier string, entry cachedDomainE
 	defer e.mu.Unlock()
 
 	e.cache[identifier] = cloneCachedDomainEnrichment(entry)
-}
-
-func (e *DomainEnricher) assetAlreadyEnriched(asset *models.Asset) bool {
-	key := domainEnricherAssetKey(asset)
-	if key == "" {
-		return false
-	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	_, exists := e.enrichedAssets[key]
-	return exists
-}
-
-func (e *DomainEnricher) markAssetEnriched(asset *models.Asset) {
-	key := domainEnricherAssetKey(asset)
-	if key == "" {
-		return
-	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	e.enrichedAssets[key] = struct{}{}
 }
 
 func (e *DomainEnricher) seedEmittedIP(enumerationID string, ip string) {
@@ -506,24 +608,6 @@ func (e *DomainEnricher) claimEmittedIP(enumerationID string, ip string) bool {
 	return true
 }
 
-func domainEnricherAssetKey(asset *models.Asset) string {
-	if asset == nil {
-		return ""
-	}
-	if id := strings.TrimSpace(asset.ID); id != "" {
-		return "id:" + id
-	}
-
-	parts := []string{
-		strings.TrimSpace(asset.EnumerationID),
-		string(asset.Type),
-		strings.TrimSpace(asset.Identifier),
-		strings.TrimSpace(asset.Source),
-		asset.DiscoveryDate.UTC().Format(time.RFC3339Nano),
-	}
-	return strings.Join(parts, "|")
-}
-
 func domainEnricherIPKey(enumerationID string, ip string) string {
 	enumerationID = strings.TrimSpace(enumerationID)
 	ip = strings.TrimSpace(ip)
@@ -538,4 +622,83 @@ func minInt(left, right int) int {
 		return left
 	}
 	return right
+}
+
+func assetContributorEnumerationIDs(asset models.Asset) []string {
+	values := make([]string, 0, len(asset.Provenance)+1)
+	if asset.EnumerationID != "" {
+		values = append(values, asset.EnumerationID)
+	}
+	for _, item := range asset.Provenance {
+		if item.EnumerationID != "" {
+			values = append(values, item.EnumerationID)
+		}
+	}
+	return uniquePreservingOrder(values)
+}
+
+func shouldRecordDomainEnrichmentObservation(asset models.Asset) bool {
+	state, exists := asset.EnrichmentStates["domain_enricher"]
+	if !exists {
+		return true
+	}
+	switch strings.TrimSpace(strings.ToLower(state.Status)) {
+	case "", "missing", "retryable":
+		return true
+	default:
+		return false
+	}
+}
+
+func domainIPRelationKinds(records []models.DNSRecord) map[string][]string {
+	kindsByIP := make(map[string][]string)
+	for _, record := range records {
+		kind := ""
+		switch strings.ToUpper(strings.TrimSpace(record.Type)) {
+		case "A":
+			kind = "dns_a"
+		case "AAAA":
+			kind = "dns_aaaa"
+		}
+		if kind == "" {
+			continue
+		}
+		ip := strings.TrimSpace(strings.ToLower(record.Value))
+		if ip == "" {
+			continue
+		}
+		kindsByIP[ip] = appendUniqueString(kindsByIP[ip], kind)
+	}
+	return kindsByIP
+}
+
+func appendUniqueString(values []string, candidate string) []string {
+	for _, value := range values {
+		if value == candidate {
+			return values
+		}
+	}
+	return append(values, candidate)
+}
+
+func uniquePreservingOrder(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+
+	return out
 }

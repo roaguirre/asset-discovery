@@ -114,6 +114,12 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 	if len(firstTrace.Sections) == 0 {
 		t.Fatalf("expected trace sections to be populated, got %+v", firstTrace)
 	}
+	if firstTrace.RootNodeID == "" || len(firstTrace.Nodes) == 0 {
+		t.Fatalf("expected trace nodes to be populated, got %+v", firstTrace)
+	}
+	if !traceHasNode(firstTrace.Nodes, firstTrace.RootNodeID, "asset") {
+		t.Fatalf("expected trace root asset node to be present, got %+v", firstTrace.Nodes)
+	}
 
 	if len(firstTrace.Related) == 0 || firstTrace.Related[0].AssetID != "asset-1-related" {
 		t.Fatalf("expected trace to link to the related result, got %+v", firstTrace.Related)
@@ -137,6 +143,7 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		`state.sources.every((source) => rowSources.includes(source))`,
 		"sourceDescriptions = Object.freeze",
 		"Certificate Transparency results from crt.sh",
+		"PTR, ASN, organization, and CIDR enrichment backfill applied to canonical IP assets.",
 		`id="app-tooltip"`,
 		"data-tooltip=",
 		`data-key="identifier" data-tooltip="The domain or hostname identifier for this asset."`,
@@ -159,11 +166,246 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		"judge-view-button",
 		"llm-summary",
 		"detail-panel",
+		"trace-tree",
+		"trace-panel",
+		"trace-node-button",
+		"trace-panel-body",
+		"trace-workspace",
+		"ownership-pill",
+		"Discovered By",
+		"Enriched By",
 		"expandedRows",
+		"expandedDomainGroups",
+		"domain-group-toggle",
+		"Showing \" + domainGroups.length + \" registrable domains",
 	} {
 		if !strings.Contains(html, needle) {
 			t.Fatalf("expected rendered HTML to contain %q", needle)
 		}
+	}
+}
+
+func TestBuildVisualizerRun_SplitsDiscoveryAndEnrichmentSources(t *testing.T) {
+	ts := time.Date(2026, time.March, 24, 9, 0, 0, 0, time.FixedZone("-0300", -3*60*60))
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Gesprobira", Domains: []string{"gesprobira.cl"}},
+		},
+		Enumerations: []models.Enumeration{
+			{ID: "enum-1", SeedID: "seed-1", Status: "running", CreatedAt: ts},
+		},
+		Assets: []models.Asset{
+			{
+				ID:            "dom-ht-1",
+				EnumerationID: "enum-1",
+				Type:          models.AssetTypeDomain,
+				Identifier:    "cpcontacts.gesprobira.cl",
+				Source:        "hackertarget_collector",
+				DiscoveryDate: ts,
+			},
+			{
+				ID:            "dom-ct-1",
+				EnumerationID: "enum-1",
+				Type:          models.AssetTypeDomain,
+				Identifier:    "cpcontacts.gesprobira.cl",
+				Source:        "crt.sh",
+				DiscoveryDate: ts.Add(10 * time.Second),
+			},
+		},
+	}
+	pCtx.EnsureAssetState()
+	pCtx.AppendAssetObservations(models.AssetObservation{
+		ID:            "obs-domain-enricher-1",
+		Kind:          models.ObservationKindEnrichment,
+		AssetID:       pCtx.Assets[0].ID,
+		EnumerationID: "enum-1",
+		Type:          models.AssetTypeDomain,
+		Identifier:    "cpcontacts.gesprobira.cl",
+		Source:        "domain_enricher",
+		DiscoveryDate: ts.Add(20 * time.Second),
+		DomainDetails: &models.DomainDetails{
+			Records: []models.DNSRecord{{Type: "A", Value: "162.240.236.164"}},
+		},
+		EnrichmentStates: map[string]models.EnrichmentState{
+			"domain_enricher": {Status: "completed", UpdatedAt: ts.Add(20 * time.Second)},
+		},
+	})
+
+	run := buildVisualizerRun("run-test", ts.Add(30*time.Second), Downloads{}, pCtx)
+	if len(run.Rows) != 1 {
+		t.Fatalf("expected one canonical row, got %+v", run.Rows)
+	}
+
+	row := run.Rows[0]
+	if row.Source != "crt.sh, hackertarget_collector" {
+		t.Fatalf("expected row source to include discovery contributors only, got %+v", row)
+	}
+	if row.DiscoveredBy != "crt.sh, hackertarget_collector" {
+		t.Fatalf("expected discovery sources to remain separate, got %+v", row)
+	}
+	if row.EnrichedBy != "domain_enricher" {
+		t.Fatalf("expected enrichment source to be isolated, got %+v", row)
+	}
+
+	trace := findTraceByAssetID(run.Traces, row.AssetID)
+	if trace == nil {
+		t.Fatalf("expected trace for canonical row, got %+v", run.Traces)
+	}
+	if trace.DiscoveredBy != row.DiscoveredBy || trace.EnrichedBy != row.EnrichedBy {
+		t.Fatalf("expected trace source split to match row, got %+v", trace)
+	}
+	if !traceHasNodeWithSource(trace.Nodes, "domain_enricher") {
+		t.Fatalf("expected trace nodes to include the enrichment observation, got %+v", trace.Nodes)
+	}
+}
+
+func TestBuildVisualizerRun_ExportsDomainResolutionAndWHOISDetails(t *testing.T) {
+	ts := time.Date(2026, time.March, 24, 0, 35, 55, 0, time.FixedZone("-0300", -3*60*60))
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{{ID: "seed-1", Domains: []string{"gesprobira.cl"}}},
+		Enumerations: []models.Enumeration{{
+			ID:        "enum-1",
+			SeedID:    "seed-1",
+			Status:    "completed",
+			CreatedAt: ts,
+			UpdatedAt: ts,
+		}},
+		Assets: []models.Asset{{
+			ID:            "dom-rdap-1",
+			EnumerationID: "enum-1",
+			Type:          models.AssetTypeDomain,
+			Identifier:    "gesprobira.cl",
+			Source:        "rdap_collector",
+			DiscoveryDate: ts,
+			DomainDetails: &models.DomainDetails{
+				RDAP: &models.RDAPData{
+					RegistrarName:   "NIC Chile",
+					RegistrarURL:    "https://www.nic.cl",
+					RegistrantName:  "Francisco Aguirre",
+					RegistrantEmail: "contacto@example.cl",
+					NameServers:     []string{"achiel.ns.cloudflare.com", "aida.ns.cloudflare.com"},
+					CreationDate:    time.Date(2018, time.January, 25, 21, 37, 38, 0, time.UTC),
+					UpdatedDate:     time.Date(2025, time.March, 23, 8, 11, 10, 0, time.UTC),
+					ExpirationDate:  time.Date(2028, time.January, 25, 21, 37, 38, 0, time.UTC),
+					Statuses:        []string{"ok"},
+				},
+			},
+			EnrichmentStates: map[string]models.EnrichmentState{
+				"domain_enricher": {Status: "completed", UpdatedAt: ts},
+			},
+		}},
+	}
+
+	run := buildVisualizerRun("run-test", ts, Downloads{}, pCtx)
+	if len(run.Rows) != 1 {
+		t.Fatalf("expected one row, got %+v", run.Rows)
+	}
+
+	row := run.Rows[0]
+	if row.ResolutionStatus != string(models.DomainResolutionStatusUnresolved) {
+		t.Fatalf("expected unresolved resolution status, got %+v", row)
+	}
+	if !hasEvidenceGroup(row.EvidenceGroups, "DNS", "Unresolved") {
+		t.Fatalf("expected DNS evidence group to show unresolved state, got %+v", row.EvidenceGroups)
+	}
+	if !hasEvidenceGroup(row.EvidenceGroups, "Registration", "Registrar: NIC Chile") {
+		t.Fatalf("expected grouped registration evidence, got %+v", row.EvidenceGroups)
+	}
+	for _, fragment := range []string{
+		"Resolution unresolved",
+		"Registrar NIC Chile",
+		"RegistrarURL https://www.nic.cl",
+		"RegistrantName Francisco Aguirre",
+		"RegistrantEmail contacto@example.cl",
+		"Created 2018-01-25",
+		"Updated 2025-03-23",
+		"Expires 2028-01-25",
+		"RegistrationStatus ok",
+	} {
+		if !strings.Contains(row.Details, fragment) {
+			t.Fatalf("expected details to contain %q, got %q", fragment, row.Details)
+		}
+	}
+
+	trace := findTraceByAssetID(run.Traces, row.AssetID)
+	if trace == nil {
+		t.Fatalf("expected trace to be exported, got %+v", run.Traces)
+	}
+	if trace.ResolutionStatus != row.ResolutionStatus {
+		t.Fatalf("expected trace resolution status to match row, got %+v", trace)
+	}
+	for _, fragment := range []string{
+		"DNS resolution: unresolved",
+		"Registrar URL: https://www.nic.cl",
+		"Registrant email: contacto@example.cl",
+		"Registration updated: 2025-03-23",
+		"Registration status: ok",
+	} {
+		if !traceSectionContains(trace.Sections, "Domain Evidence", fragment) {
+			t.Fatalf("expected domain trace section to contain %q, got %+v", fragment, trace.Sections)
+		}
+	}
+}
+
+func TestBuildVisualizerRun_MarksResolvedDomains(t *testing.T) {
+	ts := time.Date(2026, time.March, 24, 0, 35, 55, 0, time.FixedZone("-0300", -3*60*60))
+	run := buildVisualizerRun("run-test", ts, Downloads{}, sampleVisualizerContext("seed-1", "enum-1", "asset-1", "api.example.com", ts))
+	if len(run.Rows) == 0 {
+		t.Fatalf("expected rows to be exported, got %+v", run)
+	}
+	if run.Rows[0].ResolutionStatus != string(models.DomainResolutionStatusResolved) {
+		t.Fatalf("expected first row to be marked resolved, got %+v", run.Rows[0])
+	}
+	if !hasEvidenceGroup(run.Rows[0].EvidenceGroups, "DNS", "A:203.0.113.10") {
+		t.Fatalf("expected grouped DNS evidence, got %+v", run.Rows[0].EvidenceGroups)
+	}
+	if !strings.Contains(run.Rows[0].Details, "Resolution resolved") {
+		t.Fatalf("expected details to include resolved marker, got %q", run.Rows[0].Details)
+	}
+}
+
+func TestBuildVisualizerRun_ObservationTraceShowsUnresolvedDNSState(t *testing.T) {
+	ts := time.Date(2026, time.March, 24, 1, 0, 0, 0, time.FixedZone("-0300", -3*60*60))
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{{ID: "seed-1", Domains: []string{"example.com"}}},
+		Enumerations: []models.Enumeration{{
+			ID:        "enum-1",
+			SeedID:    "seed-1",
+			Status:    "completed",
+			CreatedAt: ts,
+		}},
+		Assets: []models.Asset{{
+			ID:            "dom-1",
+			EnumerationID: "enum-1",
+			Type:          models.AssetTypeDomain,
+			Identifier:    "missing.example.com",
+			Source:        "crt.sh",
+			DiscoveryDate: ts,
+		}},
+	}
+	pCtx.EnsureAssetState()
+	pCtx.AppendAssetObservations(models.AssetObservation{
+		ID:            "obs-domain-enricher-1",
+		Kind:          models.ObservationKindEnrichment,
+		AssetID:       pCtx.Assets[0].ID,
+		EnumerationID: "enum-1",
+		Type:          models.AssetTypeDomain,
+		Identifier:    "missing.example.com",
+		Source:        "domain_enricher",
+		DiscoveryDate: ts.Add(10 * time.Second),
+		DomainDetails: &models.DomainDetails{},
+		EnrichmentStates: map[string]models.EnrichmentState{
+			"domain_enricher": {Status: "completed", UpdatedAt: ts.Add(10 * time.Second)},
+		},
+	})
+
+	run := buildVisualizerRun("run-test", ts, Downloads{}, pCtx)
+	trace := findTraceByAssetID(run.Traces, pCtx.Assets[0].ID)
+	if trace == nil {
+		t.Fatalf("expected trace to be exported, got %+v", run.Traces)
+	}
+	if !traceNodeSectionContains(trace.Nodes, "domain_enricher", "Domain Evidence", "DNS resolution: unresolved") {
+		t.Fatalf("expected unresolved DNS state on enrichment observation node, got %+v", trace.Nodes)
 	}
 }
 
@@ -222,6 +464,9 @@ func TestVisualizerExporter_TracePreservesMergedContributorLineage(t *testing.T)
 
 	if trace.EnumerationID != "enum-1, enum-2" || trace.SeedID != "seed-1, seed-2" {
 		t.Fatalf("expected merged trace summary to retain both enumerations and seeds, got %+v", trace)
+	}
+	if trace.RootNodeID == "" || len(trace.Nodes) == 0 {
+		t.Fatalf("expected merged trace nodes to be present, got %+v", trace)
 	}
 
 	if !hasTraceContributor(trace.Contributors, "merged-asset-2", "enum-2", "seed-2", "wayback_collector") {
@@ -549,6 +794,53 @@ func traceSectionContains(sections []lineage.TraceSection, title, fragment strin
 		}
 		for _, item := range section.Items {
 			if strings.Contains(item, fragment) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func traceHasNode(nodes []lineage.TraceNode, id, kind string) bool {
+	for _, node := range nodes {
+		if node.ID == id && node.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func traceHasNodeWithSource(nodes []lineage.TraceNode, source string) bool {
+	for _, node := range nodes {
+		if node.Kind == "observation" && node.Label == source {
+			return true
+		}
+	}
+	return false
+}
+
+func traceNodeSectionContains(nodes []lineage.TraceNode, label, title, fragment string) bool {
+	for _, node := range nodes {
+		if node.Label != label {
+			continue
+		}
+		if traceSectionContains(node.Details, title, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEvidenceGroup(groups []EvidenceGroup, title, itemFragment string) bool {
+	for _, group := range groups {
+		if group.Title != title {
+			continue
+		}
+		if itemFragment == "" {
+			return true
+		}
+		for _, item := range group.Items {
+			if strings.Contains(item, itemFragment) {
 				return true
 			}
 		}

@@ -2,15 +2,15 @@ package filter
 
 import (
 	"context"
-	"sort"
-	"strings" // Added for strings.Contains
+	"fmt"
+	"strings"
 
-	"asset-discovery/internal/discovery"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/tracing/telemetry"
 )
 
-// MergeFilter is responsible for deduplicating assets and merging their multi-source attributes.
+// MergeFilter validates the canonical runtime asset graph after collectors and enrichers
+// have already upserted into the canonical model.
 type MergeFilter struct{}
 
 func NewMergeFilter() *MergeFilter {
@@ -19,171 +19,86 @@ func NewMergeFilter() *MergeFilter {
 
 func (f *MergeFilter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	telemetry.Info(ctx, "[Merge Filter] Deduplicating and merging discovered assets...")
+	pCtx.EnsureAssetState()
 
-	mergedAssets := make(map[string]*models.Asset)
-
-	for _, a := range pCtx.Assets {
-		// Group universally by asset Identifier (e.g. gesprobira.cl or 1.1.1.1)
-		assetKey := a.Identifier
-
-		existing, ok := mergedAssets[assetKey]
-		if !ok {
-			// First time we see this asset string, copy it into the map
-			cp := a
-			cp.Provenance = mergeAssetProvenance(cp.Provenance, assetProvenanceFromAsset(a))
-			mergedAssets[assetKey] = &cp
-
-			// Initialize empty EnrichmentData map if it's nil so we can merge values later
-			if mergedAssets[assetKey].EnrichmentData == nil {
-				mergedAssets[assetKey].EnrichmentData = make(map[string]interface{})
-			}
-			continue
-		}
-
-		// --- Deduplication & Merge Logic ---
-
-		// 1. Merge Sources (Concat uniquely if not already present)
-		if !strings.Contains(existing.Source, a.Source) {
-			existing.Source = existing.Source + ", " + a.Source
-		}
-		existing.Provenance = mergeAssetProvenance(existing.Provenance, a.Provenance...)
-		existing.Provenance = mergeAssetProvenance(existing.Provenance, assetProvenanceFromAsset(a))
-
-		// 2. Merge Domain Details (Records, RDAP)
-		if a.DomainDetails != nil {
-			if existing.DomainDetails == nil {
-				existing.DomainDetails = &models.DomainDetails{}
-			}
-
-			// Combine DNS Records
-			existing.DomainDetails.Records = append(existing.DomainDetails.Records, a.DomainDetails.Records...)
-
-			if a.DomainDetails.RDAP != nil {
-				if existing.DomainDetails.RDAP == nil {
-					existing.DomainDetails.RDAP = a.DomainDetails.RDAP
-				} else {
-					mergeRDAPData(existing.DomainDetails.RDAP, a.DomainDetails.RDAP)
-				}
-			}
-		}
-
-		// 3. Merge IP Details (ASN, PTR, Org)
-		if a.IPDetails != nil {
-			if existing.IPDetails == nil {
-				existing.IPDetails = &models.IPDetails{}
-			}
-			if existing.IPDetails.ASN == 0 && a.IPDetails.ASN != 0 {
-				existing.IPDetails.ASN = a.IPDetails.ASN
-			}
-			if existing.IPDetails.Organization == "" && a.IPDetails.Organization != "" {
-				existing.IPDetails.Organization = a.IPDetails.Organization
-			}
-			if existing.IPDetails.PTR == "" && a.IPDetails.PTR != "" {
-				existing.IPDetails.PTR = a.IPDetails.PTR
-			}
-		}
-
-		// 4. Merge Extensible Enrichment Data Maps
-		if a.EnrichmentData != nil {
-			for k, v := range a.EnrichmentData {
-				existing.EnrichmentData[k] = v
-			}
-		}
+	duplicateAssets, danglingObservations, danglingRelations := validateCanonicalGraph(pCtx)
+	if duplicateAssets > 0 || danglingObservations > 0 || danglingRelations > 0 {
+		telemetry.Infof(
+			ctx,
+			"[Merge Filter] Canonical graph validation found duplicate_assets=%d dangling_observations=%d dangling_relations=%d.",
+			duplicateAssets,
+			danglingObservations,
+			danglingRelations,
+		)
+	} else {
+		telemetry.Infof(ctx, "[Merge Filter] Canonical graph validated: %d observations, %d relations, %d unique assets.", len(pCtx.Observations), len(pCtx.Relations), len(pCtx.Assets))
 	}
 
-	// Flatten the map back into the standard pipeline context slice
-	var finalAssets []models.Asset
-	for _, a := range mergedAssets {
-		finalAssets = append(finalAssets, *a)
-	}
-
-	telemetry.Infof(ctx, "[Merge Filter] Compressed pipeline from %d raw records down to %d unique merged assets.", len(pCtx.Assets), len(finalAssets))
-	pCtx.Assets = finalAssets
 	return pCtx, nil
 }
 
-func assetProvenanceFromAsset(asset models.Asset) models.AssetProvenance {
-	return models.AssetProvenance{
-		AssetID:       strings.TrimSpace(asset.ID),
-		EnumerationID: strings.TrimSpace(asset.EnumerationID),
-		Source:        strings.TrimSpace(asset.Source),
-		DiscoveryDate: asset.DiscoveryDate,
-	}
-}
+func validateCanonicalGraph(pCtx *models.PipelineContext) (duplicateAssets int, danglingObservations int, danglingRelations int) {
+	assetIDs := make(map[string]struct{}, len(pCtx.Assets))
+	assetKeys := make(map[string]string, len(pCtx.Assets))
+	validationErrors := make([]error, 0)
 
-func mergeAssetProvenance(existing []models.AssetProvenance, incoming ...models.AssetProvenance) []models.AssetProvenance {
-	merged := append([]models.AssetProvenance(nil), existing...)
-	index := make(map[string]int, len(merged))
-	for i, item := range merged {
-		index[assetProvenanceKey(item)] = i
-	}
+	for _, asset := range pCtx.Assets {
+		if asset.ID != "" {
+			assetIDs[asset.ID] = struct{}{}
+		}
 
-	for _, item := range incoming {
-		if item.AssetID == "" && item.EnumerationID == "" && item.Source == "" && item.DiscoveryDate.IsZero() {
+		key := canonicalValidationKey(asset.Type, asset.Identifier)
+		if key == "" {
 			continue
 		}
-
-		key := assetProvenanceKey(item)
-		if _, exists := index[key]; exists {
+		if existingID, exists := assetKeys[key]; exists && existingID != asset.ID {
+			duplicateAssets++
+			validationErrors = append(validationErrors, fmt.Errorf("duplicate canonical asset key %s for %s and %s", key, existingID, asset.ID))
 			continue
 		}
-
-		index[key] = len(merged)
-		merged = append(merged, item)
+		assetKeys[key] = asset.ID
 	}
 
-	sort.SliceStable(merged, func(i, j int) bool {
-		if merged[i].DiscoveryDate.Equal(merged[j].DiscoveryDate) {
-			return assetProvenanceKey(merged[i]) < assetProvenanceKey(merged[j])
+	for _, observation := range pCtx.Observations {
+		if observation.AssetID == "" {
+			danglingObservations++
+			validationErrors = append(validationErrors, fmt.Errorf("observation %s is missing a canonical asset id", observation.ID))
+			continue
 		}
-		if merged[i].DiscoveryDate.IsZero() {
-			return false
+		if _, exists := assetIDs[observation.AssetID]; !exists {
+			danglingObservations++
+			validationErrors = append(validationErrors, fmt.Errorf("observation %s references missing asset %s", observation.ID, observation.AssetID))
 		}
-		if merged[j].DiscoveryDate.IsZero() {
-			return true
-		}
-		return merged[i].DiscoveryDate.Before(merged[j].DiscoveryDate)
-	})
+	}
 
-	return merged
+	for _, relation := range pCtx.Relations {
+		if relation.FromAssetID != "" {
+			if _, exists := assetIDs[relation.FromAssetID]; !exists {
+				danglingRelations++
+				validationErrors = append(validationErrors, fmt.Errorf("relation %s references missing from_asset_id %s", relation.ID, relation.FromAssetID))
+			}
+		}
+		if relation.ToAssetID != "" {
+			if _, exists := assetIDs[relation.ToAssetID]; !exists {
+				danglingRelations++
+				validationErrors = append(validationErrors, fmt.Errorf("relation %s references missing to_asset_id %s", relation.ID, relation.ToAssetID))
+			}
+		}
+	}
+
+	if len(validationErrors) > 0 {
+		pCtx.Lock()
+		pCtx.Errors = append(pCtx.Errors, validationErrors...)
+		pCtx.Unlock()
+	}
+
+	return duplicateAssets, danglingObservations, danglingRelations
 }
 
-func assetProvenanceKey(item models.AssetProvenance) string {
-	return item.AssetID + "|" + item.EnumerationID + "|" + item.Source + "|" + item.DiscoveryDate.UTC().Format("2006-01-02T15:04:05.999999999Z07:00")
-}
-
-func mergeRDAPData(existing, incoming *models.RDAPData) {
-	if existing == nil || incoming == nil {
-		return
+func canonicalValidationKey(assetType models.AssetType, identifier string) string {
+	identifier = strings.TrimSpace(strings.ToLower(identifier))
+	if assetType == "" || identifier == "" {
+		return ""
 	}
-
-	if existing.RegistrarName == "" {
-		existing.RegistrarName = incoming.RegistrarName
-	}
-	if existing.RegistrarIANAID == "" {
-		existing.RegistrarIANAID = incoming.RegistrarIANAID
-	}
-	if existing.CreationDate.IsZero() {
-		existing.CreationDate = incoming.CreationDate
-	}
-	if existing.ExpirationDate.IsZero() {
-		existing.ExpirationDate = incoming.ExpirationDate
-	}
-	if existing.UpdatedDate.IsZero() {
-		existing.UpdatedDate = incoming.UpdatedDate
-	}
-	if existing.RegistrantName == "" {
-		existing.RegistrantName = incoming.RegistrantName
-	}
-	if existing.RegistrantEmail == "" {
-		existing.RegistrantEmail = incoming.RegistrantEmail
-	}
-	if existing.RegistrantOrg == "" {
-		existing.RegistrantOrg = incoming.RegistrantOrg
-	}
-
-	existing.Statuses = append(existing.Statuses, incoming.Statuses...)
-	existing.NameServers = append(existing.NameServers, incoming.NameServers...)
-	existing.Statuses = discovery.UniqueLowerStrings(existing.Statuses)
-	existing.NameServers = discovery.UniqueLowerStrings(existing.NameServers)
+	return string(assetType) + "|" + identifier
 }

@@ -24,16 +24,34 @@ type TraceContributor struct {
 	DiscoveryDate time.Time `json:"discovery_date,omitempty"`
 }
 
+type TraceNode struct {
+	ID                  string         `json:"id"`
+	ParentID            string         `json:"parent_id,omitempty"`
+	Kind                string         `json:"kind,omitempty"`
+	Label               string         `json:"label"`
+	Subtitle            string         `json:"subtitle,omitempty"`
+	Badges              []string       `json:"badges,omitempty"`
+	LinkedAssetID       string         `json:"linked_asset_id,omitempty"`
+	LinkedObservationID string         `json:"linked_observation_id,omitempty"`
+	LinkedRelationID    string         `json:"linked_relation_id,omitempty"`
+	Details             []TraceSection `json:"details,omitempty"`
+}
+
 type Trace struct {
 	AssetID           string             `json:"asset_id"`
 	Identifier        string             `json:"identifier"`
 	AssetType         string             `json:"asset_type"`
 	Source            string             `json:"source"`
+	DiscoveredBy      string             `json:"discovered_by,omitempty"`
+	EnrichedBy        string             `json:"enriched_by,omitempty"`
 	EnumerationID     string             `json:"enumeration_id"`
 	SeedID            string             `json:"seed_id"`
 	DomainKind        string             `json:"domain_kind,omitempty"`
 	RegistrableDomain string             `json:"registrable_domain,omitempty"`
+	ResolutionStatus  string             `json:"resolution_status,omitempty"`
 	Contributors      []TraceContributor `json:"contributors,omitempty"`
+	RootNodeID        string             `json:"root_node_id,omitempty"`
+	Nodes             []TraceNode        `json:"nodes,omitempty"`
 	Sections          []TraceSection     `json:"sections,omitempty"`
 	Related           []TraceLink        `json:"related,omitempty"`
 }

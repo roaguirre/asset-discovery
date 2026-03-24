@@ -190,6 +190,7 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 	var newEnums []models.Enumeration
 	var newErrors []error
 	var newAssets []models.Asset
+	var newRelations []models.AssetRelation
 
 	for _, seed := range pCtx.CollectionSeeds() {
 		enum := models.Enumeration{
@@ -231,20 +232,43 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 
 			baseline.addObservation(baseDomain, observation, rdapData)
 
+			baseAssetID := ""
 			if len(observation.records) > 0 {
-				newAssets = append(newAssets, domainAssetFromObservation(models.NewID("dom"), enum.ID, baseDomain, "dns_collector", observation, nil))
+				baseAsset := domainAssetFromObservation(models.NewID("dom"), enum.ID, baseDomain, "dns_collector", observation, nil)
+				baseAssetID = baseAsset.ID
+				newAssets = append(newAssets, baseAsset)
 			}
 
 			for _, ip := range observation.ips {
+				observationID := models.NewID("ip")
 				newAssets = append(newAssets, models.Asset{
-					ID:            models.NewID("ip"),
-					EnumerationID: enum.ID,
-					Type:          models.AssetTypeIP,
-					Identifier:    ip,
-					Source:        "dns_collector",
-					DiscoveryDate: time.Now(),
-					IPDetails:     &models.IPDetails{},
+					ID:              observationID,
+					EnumerationID:   enum.ID,
+					Type:            models.AssetTypeIP,
+					Identifier:      ip,
+					Source:          "dns_collector",
+					DiscoveryDate:   time.Now(),
+					OwnershipState:  models.OwnershipStateAssociatedInfrastructure,
+					InclusionReason: "Resolved from " + baseDomain + " via DNS",
+					IPDetails:       &models.IPDetails{},
 				})
+				for _, relationKind := range dnsIPRelationKinds(observation, ip) {
+					newRelations = append(newRelations, models.AssetRelation{
+						ID:             models.NewID("rel-dns-ip"),
+						FromAssetID:    baseAssetID,
+						FromAssetType:  models.AssetTypeDomain,
+						FromIdentifier: baseDomain,
+						ToAssetType:    models.AssetTypeIP,
+						ToIdentifier:   ip,
+						ObservationID:  observationID,
+						EnumerationID:  enum.ID,
+						Source:         "dns_collector",
+						Kind:           relationKind,
+						Label:          "Resolved IP",
+						Reason:         "Resolved from " + baseDomain + " via DNS",
+						DiscoveryDate:  time.Now(),
+					})
+				}
 			}
 
 			for _, candidate := range observation.domainCandidates() {
@@ -254,14 +278,35 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 
 				if _, inScope := baseline.seedRoots[candidate.root]; inScope {
 					if candidate.host != "" && candidate.host != baseDomain {
+						hostAssetID := models.NewID("dom-dns-host")
+						relationKind := dnsCandidateRelationKind(candidate.sourceKind)
+						reason := "Observed from " + baseDomain + " via " + relationKind
 						newAssets = append(newAssets, models.Asset{
-							ID:            models.NewID("dom-dns-host"),
-							EnumerationID: enum.ID,
-							Type:          models.AssetTypeDomain,
-							Identifier:    candidate.host,
-							Source:        "dns_collector",
-							DiscoveryDate: time.Now(),
-							DomainDetails: &models.DomainDetails{},
+							ID:              hostAssetID,
+							EnumerationID:   enum.ID,
+							Type:            models.AssetTypeDomain,
+							Identifier:      candidate.host,
+							Source:          "dns_collector",
+							DiscoveryDate:   time.Now(),
+							OwnershipState:  models.OwnershipStateOwned,
+							InclusionReason: reason,
+							DomainDetails:   &models.DomainDetails{},
+						})
+						newRelations = append(newRelations, models.AssetRelation{
+							ID:             models.NewID("rel-dns-host"),
+							FromAssetID:    baseAssetID,
+							FromAssetType:  models.AssetTypeDomain,
+							FromIdentifier: baseDomain,
+							ToAssetID:      hostAssetID,
+							ToAssetType:    models.AssetTypeDomain,
+							ToIdentifier:   candidate.host,
+							ObservationID:  hostAssetID,
+							EnumerationID:  enum.ID,
+							Source:         "dns_collector",
+							Kind:           relationKind,
+							Label:          "Discovered Host",
+							Reason:         reason,
+							DiscoveryDate:  time.Now(),
 						})
 					}
 					continue
@@ -395,8 +440,9 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 	pCtx.Lock()
 	pCtx.Enumerations = append(pCtx.Enumerations, newEnums...)
 	pCtx.Errors = append(pCtx.Errors, newErrors...)
-	pCtx.Assets = append(pCtx.Assets, newAssets...)
 	pCtx.Unlock()
+	pCtx.AppendAssets(newAssets...)
+	pCtx.AppendAssetRelations(newRelations...)
 
 	return pCtx, nil
 }
@@ -1216,4 +1262,49 @@ func (a *dnsLookupIssueAggregator) log(ctx context.Context, probeKind string) {
 			a.samples[key],
 		)
 	}
+}
+
+func dnsIPRelationKinds(observation dnsObservation, ip string) []string {
+	ip = strings.TrimSpace(strings.ToLower(ip))
+	if ip == "" {
+		return nil
+	}
+
+	kinds := make([]string, 0, 2)
+	for _, record := range observation.records {
+		if strings.TrimSpace(strings.ToLower(record.Value)) != ip {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(record.Type)) {
+		case "A":
+			kinds = appendUniqueRelationKind(kinds, "dns_a")
+		case "AAAA":
+			kinds = appendUniqueRelationKind(kinds, "dns_aaaa")
+		}
+	}
+	return kinds
+}
+
+func dnsCandidateRelationKind(sourceKind string) string {
+	switch strings.TrimSpace(strings.ToLower(sourceKind)) {
+	case dnsSourceKindNS:
+		return "dns_ns"
+	case dnsSourceKindMX:
+		return "dns_mx"
+	case dnsSourceKindTXT:
+		return "dns_txt"
+	case dnsSourceKindCNAME:
+		return "dns_cname"
+	default:
+		return "dns_reference"
+	}
+}
+
+func appendUniqueRelationKind(values []string, candidate string) []string {
+	for _, value := range values {
+		if value == candidate {
+			return values
+		}
+	}
+	return append(values, candidate)
 }

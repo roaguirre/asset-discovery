@@ -35,6 +35,7 @@ func NewVisualizerExporter(filepath, runID string, downloads Downloads) *Visuali
 
 func (e *VisualizerExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	telemetry.Infof(ctx, "[Visualizer Exporter] Writing run history to %s...", e.filepath)
+	pCtx.EnsureAssetState()
 
 	completedAt := e.now()
 	markEnumerationsCompleted(pCtx, completedAt)
@@ -99,11 +100,34 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads Downloads, 
 		seedByID[seed.ID] = seed
 	}
 
+	observationsByAssetID := make(map[string][]models.AssetObservation, len(pCtx.Observations))
+	for _, observation := range pCtx.Observations {
+		if observation.AssetID == "" {
+			continue
+		}
+		observationsByAssetID[observation.AssetID] = append(observationsByAssetID[observation.AssetID], observation)
+	}
+
+	relationsByAssetID := make(map[string][]models.AssetRelation, len(pCtx.Relations))
+	for _, relation := range pCtx.Relations {
+		if relation.FromAssetID != "" {
+			relationsByAssetID[relation.FromAssetID] = append(relationsByAssetID[relation.FromAssetID], relation)
+		}
+		if relation.ToAssetID != "" && relation.ToAssetID != relation.FromAssetID {
+			relationsByAssetID[relation.ToAssetID] = append(relationsByAssetID[relation.ToAssetID], relation)
+		}
+	}
+
 	rows := make([]Row, 0, len(pCtx.Assets))
 	tracesByAssetID := make(map[string]lineage.Trace, len(pCtx.Assets))
 	for _, asset := range SortedAssetsForExport(pCtx.Assets) {
 		classified := ClassifyAsset(asset)
 		contributors := lineage.BuildTraceContributors(asset, enumByID, seedByID)
+		allSources, discoverySources, enrichmentSources := lineage.SummarizeObservationSources(observationsByAssetID[asset.ID], asset.Source)
+		rowSource := discoverySources
+		if strings.TrimSpace(rowSource) == "" {
+			rowSource = allSources
+		}
 		tracePath := lineage.BuildTracePath(runID, asset.ID)
 		row := Row{
 			AssetID:           asset.ID,
@@ -111,12 +135,18 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads Downloads, 
 			AssetType:         string(asset.Type),
 			DomainKind:        string(classified.DomainKind),
 			RegistrableDomain: classified.RegistrableDomain,
-			Source:            asset.Source,
+			ResolutionStatus:  string(models.DomainResolutionStatusForAsset(asset)),
+			OwnershipState:    string(asset.OwnershipState),
+			InclusionReason:   asset.InclusionReason,
+			Source:            rowSource,
+			DiscoveredBy:      discoverySources,
+			EnrichedBy:        enrichmentSources,
 			EnumerationID:     lineage.SummarizeContributorValues(contributors, func(item lineage.TraceContributor) string { return item.EnumerationID }),
 			SeedID:            lineage.SummarizeContributorValues(contributors, func(item lineage.TraceContributor) string { return item.SeedID }),
 			Status:            lineage.SummarizeTraceStatus(asset, contributors, enumByID),
 			DiscoveryDate:     asset.DiscoveryDate,
 			Details:           buildVisualizerDetails(asset),
+			EvidenceGroups:    buildVisualizerEvidenceGroups(asset),
 			TracePath:         tracePath,
 		}
 		if asset.IPDetails != nil {
@@ -125,7 +155,16 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads Downloads, 
 			row.PTR = asset.IPDetails.PTR
 		}
 		rows = append(rows, row)
-		tracesByAssetID[asset.ID] = lineage.BuildTrace(asset, string(classified.DomainKind), classified.RegistrableDomain, contributors, enumByID, seedByID)
+		tracesByAssetID[asset.ID] = lineage.BuildTrace(
+			asset,
+			string(classified.DomainKind),
+			classified.RegistrableDomain,
+			contributors,
+			observationsByAssetID[asset.ID],
+			relationsByAssetID[asset.ID],
+			enumByID,
+			seedByID,
+		)
 	}
 
 	sort.SliceStable(rows, func(i, j int) bool {
@@ -187,7 +226,17 @@ func visualizerRowGroup(row Row) int {
 }
 
 func buildVisualizerDetails(asset models.Asset) string {
-	parts := make([]string, 0, 8)
+	parts := make([]string, 0, 16)
+
+	if asset.OwnershipState != "" {
+		parts = append(parts, "Ownership "+string(asset.OwnershipState))
+	}
+	if asset.InclusionReason != "" {
+		parts = append(parts, "Reason "+asset.InclusionReason)
+	}
+	if resolution := models.DomainResolutionStatusForAsset(asset); resolution != "" {
+		parts = append(parts, "Resolution "+string(resolution))
+	}
 
 	if asset.DomainDetails != nil {
 		if len(asset.DomainDetails.Records) > 0 {
@@ -203,15 +252,7 @@ func buildVisualizerDetails(asset models.Asset) string {
 		}
 
 		if asset.DomainDetails.RDAP != nil {
-			if asset.DomainDetails.RDAP.RegistrarName != "" {
-				parts = append(parts, "Registrar "+asset.DomainDetails.RDAP.RegistrarName)
-			}
-			if asset.DomainDetails.RDAP.RegistrantOrg != "" {
-				parts = append(parts, "Registrant "+asset.DomainDetails.RDAP.RegistrantOrg)
-			}
-			if len(asset.DomainDetails.RDAP.NameServers) > 0 {
-				parts = append(parts, "NS "+strings.Join(asset.DomainDetails.RDAP.NameServers, ", "))
-			}
+			appendVisualizerRDAPDetails(&parts, asset.DomainDetails.RDAP)
 		}
 	}
 
@@ -234,6 +275,146 @@ func buildVisualizerDetails(asset models.Asset) string {
 	}
 
 	return strings.Join(parts, " | ")
+}
+
+func appendVisualizerRDAPDetails(parts *[]string, rdap *models.RDAPData) {
+	if rdap == nil {
+		return
+	}
+	if rdap.RegistrarName != "" {
+		*parts = append(*parts, "Registrar "+rdap.RegistrarName)
+	}
+	if rdap.RegistrarURL != "" {
+		*parts = append(*parts, "RegistrarURL "+rdap.RegistrarURL)
+	}
+	if rdap.RegistrantName != "" {
+		*parts = append(*parts, "RegistrantName "+rdap.RegistrantName)
+	}
+	if rdap.RegistrantOrg != "" {
+		*parts = append(*parts, "RegistrantOrg "+rdap.RegistrantOrg)
+	}
+	if rdap.RegistrantEmail != "" {
+		*parts = append(*parts, "RegistrantEmail "+rdap.RegistrantEmail)
+	}
+	if len(rdap.NameServers) > 0 {
+		*parts = append(*parts, "Nameservers "+strings.Join(rdap.NameServers, ", "))
+	}
+	if !rdap.CreationDate.IsZero() {
+		*parts = append(*parts, "Created "+rdap.CreationDate.Format("2006-01-02"))
+	}
+	if !rdap.UpdatedDate.IsZero() {
+		*parts = append(*parts, "Updated "+rdap.UpdatedDate.Format("2006-01-02"))
+	}
+	if !rdap.ExpirationDate.IsZero() {
+		*parts = append(*parts, "Expires "+rdap.ExpirationDate.Format("2006-01-02"))
+	}
+	if len(rdap.Statuses) > 0 {
+		*parts = append(*parts, "RegistrationStatus "+strings.Join(rdap.Statuses, ", "))
+	}
+}
+
+func buildVisualizerEvidenceGroups(asset models.Asset) []EvidenceGroup {
+	groups := make([]EvidenceGroup, 0, 4)
+
+	if asset.Type == models.AssetTypeDomain {
+		resolution := models.DomainResolutionStatusForAsset(asset)
+		dnsItems := make([]string, 0, 8)
+		if asset.DomainDetails != nil {
+			for _, record := range asset.DomainDetails.Records {
+				dnsItems = append(dnsItems, fmt.Sprintf("%s:%s", record.Type, record.Value))
+			}
+			if asset.DomainDetails.IsCatchAll {
+				dnsItems = append(dnsItems, "Catch-all detected")
+			}
+		}
+		if len(dnsItems) == 0 {
+			switch resolution {
+			case models.DomainResolutionStatusUnresolved:
+				dnsItems = append(dnsItems, "Unresolved")
+			case models.DomainResolutionStatusLookupFailed:
+				dnsItems = append(dnsItems, "Lookup failed")
+			}
+		}
+		if len(dnsItems) > 0 {
+			groups = append(groups, EvidenceGroup{
+				Title: "DNS",
+				Items: dnsItems,
+			})
+		}
+
+		if asset.DomainDetails != nil {
+			if registrationItems := buildVisualizerRegistrationItems(asset.DomainDetails.RDAP); len(registrationItems) > 0 {
+				groups = append(groups, EvidenceGroup{
+					Title: "Registration",
+					Items: registrationItems,
+				})
+			}
+		}
+	}
+
+	if asset.Type == models.AssetTypeIP {
+		networkItems := make([]string, 0, 4)
+		if asset.IPDetails != nil {
+			if asset.IPDetails.ASN != 0 {
+				networkItems = append(networkItems, fmt.Sprintf("ASN: %d", asset.IPDetails.ASN))
+			}
+			if asset.IPDetails.Organization != "" {
+				networkItems = append(networkItems, "Organization: "+asset.IPDetails.Organization)
+			}
+			if asset.IPDetails.PTR != "" {
+				networkItems = append(networkItems, "PTR: "+asset.IPDetails.PTR)
+			}
+		}
+		if asset.EnrichmentData != nil {
+			if cidr, ok := asset.EnrichmentData["cidr"].(string); ok && cidr != "" {
+				networkItems = append(networkItems, "CIDR: "+cidr)
+			}
+		}
+		if len(networkItems) > 0 {
+			groups = append(groups, EvidenceGroup{
+				Title: "Network",
+				Items: networkItems,
+			})
+		}
+	}
+
+	return groups
+}
+
+func buildVisualizerRegistrationItems(rdap *models.RDAPData) []string {
+	if rdap == nil {
+		return nil
+	}
+
+	items := make([]string, 0, 9)
+	if rdap.RegistrarName != "" {
+		items = append(items, "Registrar: "+rdap.RegistrarName)
+	}
+	if rdap.RegistrarURL != "" {
+		items = append(items, "Registrar URL: "+rdap.RegistrarURL)
+	}
+	if rdap.RegistrantName != "" {
+		items = append(items, "Registrant name: "+rdap.RegistrantName)
+	}
+	if rdap.RegistrantOrg != "" {
+		items = append(items, "Registrant organization: "+rdap.RegistrantOrg)
+	}
+	if rdap.RegistrantEmail != "" {
+		items = append(items, "Registrant email: "+rdap.RegistrantEmail)
+	}
+	if !rdap.CreationDate.IsZero() {
+		items = append(items, "Created: "+rdap.CreationDate.Format("2006-01-02"))
+	}
+	if !rdap.UpdatedDate.IsZero() {
+		items = append(items, "Updated: "+rdap.UpdatedDate.Format("2006-01-02"))
+	}
+	if !rdap.ExpirationDate.IsZero() {
+		items = append(items, "Expires: "+rdap.ExpirationDate.Format("2006-01-02"))
+	}
+	if len(rdap.Statuses) > 0 {
+		items = append(items, "Status: "+strings.Join(rdap.Statuses, ", "))
+	}
+	return items
 }
 
 func buildVisualizerTraceLinks(runID string, row Row, rows []Row) []lineage.TraceLink {
@@ -844,6 +1025,33 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       font-size: 0.72rem;
     }
 
+    .domain-group-summary {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .domain-group-toggle {
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 700;
+      padding: 0.25rem 0.45rem;
+      border-radius: 8px;
+    }
+
+    .domain-group-toggle:hover { background: var(--accent-soft); }
+
+    .domain-group-copy {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+    }
+
     /* --- Expandable Detail Row --- */
     .detail-toggle {
       border: 0;
@@ -868,7 +1076,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     .detail-panel {
       padding: 1rem 1.25rem;
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: minmax(300px, 1.6fr) minmax(220px, 1fr) minmax(220px, 1fr);
       gap: 1rem;
       animation: detailSlide 200ms ease;
     }
@@ -894,50 +1102,137 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       color: var(--muted);
     }
 
-    .detail-kv { display: grid; gap: 0.35rem; }
-
-    .detail-kv-row {
-      display: flex;
-      gap: 0.5rem;
-      font-size: 0.88rem;
-      line-height: 1.45;
+    .detail-summary-card {
+      display: grid;
+      gap: 0.9rem;
+      align-content: start;
     }
 
-    .detail-kv-label {
-      flex: none;
-      min-width: 7rem;
-      font-weight: 600;
-      color: var(--muted);
-    }
-
-    .detail-kv-value {
-      word-break: break-word;
-      font-family: var(--font-mono);
-      font-size: 0.82rem;
-    }
-
-    .detail-trace-items {
-      margin: 0;
-      padding-left: 1rem;
-      font-size: 0.88rem;
-      line-height: 1.55;
-    }
-
-    .detail-trace-items li + li { margin-top: 0.35rem; }
-
-    .detail-related-list { display: grid; gap: 0.45rem; }
-
-    .detail-related-item {
+    .detail-summary-head {
       display: flex;
       flex-wrap: wrap;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
+      gap: 0.85rem;
+    }
+
+    .detail-summary-head h4 {
+      margin: 0.18rem 0 0.2rem;
+      color: var(--ink);
+      font-size: 1rem;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .detail-summary-badges,
+    .detail-summary-meta,
+    .detail-related-inline,
+    .trace-panel-meta,
+    .trace-node-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .detail-summary-reason {
+      margin: 0;
+      font-size: 0.92rem;
+      line-height: 1.6;
+      color: var(--ink);
+    }
+
+    .detail-summary-meta {
+      gap: 0.75rem;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    .detail-summary-meta strong {
+      color: var(--ink);
+      font-weight: 700;
+      margin-right: 0.25rem;
+    }
+
+    .detail-summary-sources {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .detail-summary-sources strong {
+      display: block;
+      margin-bottom: 0.35rem;
+      color: var(--ink);
+      font-size: 0.84rem;
+    }
+
+    .detail-actions {
+      display: flex;
+      flex-wrap: wrap;
       gap: 0.5rem;
+    }
+
+    .detail-compact-card {
+      display: grid;
+      gap: 0.7rem;
+      align-content: start;
+    }
+
+    .detail-preview-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 0.55rem;
+    }
+
+    .detail-preview-list li {
+      display: grid;
+      gap: 0.18rem;
       padding: 0.55rem 0.65rem;
       border-radius: 10px;
       background: rgba(249, 244, 235, 0.72);
       border: 1px solid rgba(80, 61, 44, 0.06);
-      font-size: 0.85rem;
+    }
+
+    .detail-preview-label {
+      font-size: 0.72rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .detail-preview-value {
+      font-size: 0.88rem;
+      line-height: 1.5;
+      color: var(--ink);
+      word-break: break-word;
+    }
+
+    .detail-evidence-groups {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .detail-evidence-group {
+      display: grid;
+      gap: 0.45rem;
+      padding: 0.7rem 0.8rem;
+      border-radius: 12px;
+      background: rgba(249, 244, 235, 0.72);
+      border: 1px solid rgba(80, 61, 44, 0.06);
+    }
+
+    .detail-evidence-items {
+      display: grid;
+      gap: 0.28rem;
+    }
+
+    .detail-evidence-item {
+      font-size: 0.88rem;
+      line-height: 1.5;
+      color: var(--ink);
+      word-break: break-word;
     }
 
     /* --- Trace & Judge (kept) --- */
@@ -996,10 +1291,132 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       text-transform: none;
     }
 
-    .trace-grid {
+    .ownership-pill.ownership-owned {
+      background: rgba(24, 131, 106, 0.14);
+      color: var(--green);
+    }
+
+    .ownership-pill.ownership-associated-infrastructure {
+      background: rgba(190, 106, 21, 0.14);
+      color: var(--accent-strong);
+    }
+
+    .ownership-pill.ownership-uncertain {
+      background: rgba(143, 72, 22, 0.14);
+      color: #8f4816;
+    }
+
+    .trace-workspace {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      grid-template-columns: minmax(280px, 0.95fr) minmax(0, 1.45fr);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    .trace-tree-shell, .trace-panel-shell {
+      padding: 1rem;
+      border-radius: 18px;
+      border: 1px solid rgba(126, 59, 0, 0.08);
+      background: rgba(255, 255, 255, 0.82);
+      min-height: 23rem;
+    }
+
+    .trace-tree-list {
+      display: grid;
+      gap: 0.45rem;
+      margin-top: 0.9rem;
+    }
+
+    .trace-tree-node {
+      padding-left: calc(var(--trace-depth, 0) * 0.9rem);
+    }
+
+    .trace-tree-children {
+      margin-top: 0.35rem;
+      display: grid;
+      gap: 0.35rem;
+    }
+
+    .trace-node-button {
+      width: 100%;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.65rem;
+      padding: 0.8rem 0.9rem;
+      border-radius: 14px;
+      border: 1px solid rgba(80, 61, 44, 0.08);
+      background: rgba(249, 244, 235, 0.6);
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .trace-node-button:hover {
+      border-color: rgba(190, 106, 21, 0.24);
+      background: rgba(255, 248, 235, 0.95);
+      transform: translateY(-1px);
+    }
+
+    .trace-node-button.is-active {
+      border-color: rgba(190, 106, 21, 0.32);
+      background: linear-gradient(180deg, rgba(255, 248, 235, 0.96), rgba(255, 255, 255, 0.92));
+      box-shadow: 0 10px 24px rgba(126, 59, 0, 0.08);
+    }
+
+    .trace-node-copy {
+      display: grid;
+      gap: 0.18rem;
+      min-width: 0;
+    }
+
+    .trace-node-label {
+      font-weight: 700;
+      font-size: 0.95rem;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .trace-node-subtitle {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .trace-panel-body {
+      display: grid;
       gap: 0.85rem;
+      margin-top: 0.9rem;
+    }
+
+    .trace-panel-hero {
+      display: grid;
+      gap: 0.75rem;
+      padding: 0.95rem 1rem;
+      border-radius: 16px;
+      border: 1px solid rgba(126, 59, 0, 0.08);
+      background: linear-gradient(180deg, rgba(255, 248, 235, 0.94), rgba(255, 255, 255, 0.9));
+    }
+
+    .trace-panel-hero h3 {
+      margin: 0 0 0.25rem;
+      font-family: var(--font-heading);
+      font-size: 1.1rem;
+    }
+
+    .trace-panel-hero p {
+      margin: 0;
+    }
+
+    .trace-panel-empty {
+      display: grid;
+      place-items: center;
+      min-height: 18rem;
+      text-align: center;
+      color: var(--muted);
     }
 
     .trace-card {
@@ -1040,6 +1457,13 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     }
 
     .trace-related-copy strong { display: block; margin-bottom: 0.2rem; }
+
+    @media (max-width: 1080px) {
+      .detail-panel,
+      .trace-workspace {
+        grid-template-columns: 1fr;
+      }
+    }
 
     /* --- Judge --- */
     .judge-shell {
@@ -1229,6 +1653,12 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           <option value="">All domain kinds</option>
         </select>
       </div>
+      <div class="field" id="resolution-status-field">
+        <label for="resolution-status-filter">Resolution</label>
+        <select id="resolution-status-filter">
+          <option value="">All resolution states</option>
+        </select>
+      </div>
       <div class="field">
         <label for="source-filter-trigger">Source</label>
         <div class="multi-select" id="source-filter">
@@ -1321,7 +1751,16 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           <button type="button" class="trace-back-button" id="trace-back-button">Back To Results</button>
         </div>
         <div class="trace-summary" id="trace-summary"></div>
-        <div class="trace-grid" id="trace-sections"></div>
+        <div class="trace-workspace">
+          <aside class="trace-tree-shell">
+            <div class="eyebrow">Trace Tree</div>
+            <div id="trace-tree"></div>
+          </aside>
+          <section class="trace-panel-shell">
+            <div class="eyebrow">Node Details</div>
+            <div id="trace-panel"></div>
+          </section>
+        </div>
         <div class="trace-related-shell">
           <h3>Related Results</h3>
           <div id="trace-related"></div>
@@ -1345,17 +1784,22 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       search: "",
       type: "",
       domainKind: "",
+      resolutionStatus: "",
       sources: [],
       view: initialHash.view,
       traceAssetId: initialHash.assetId,
+      traceNodeId: "",
       sortKey: "discovery_date",
       sortDirection: "desc",
-      expandedRows: new Set()
+      expandedRows: new Set(),
+      expandedDomainGroups: new Set()
     };
 
     const runSelect = document.getElementById("run-select");
     const searchInput = document.getElementById("search-input");
-        const domainKindFilter = document.getElementById("domain-kind-filter");
+    const domainKindFilter = document.getElementById("domain-kind-filter");
+    const resolutionStatusField = document.getElementById("resolution-status-field");
+    const resolutionStatusFilter = document.getElementById("resolution-status-filter");
     const sourceFilter = document.getElementById("source-filter");
     const sourceFilterTrigger = document.getElementById("source-filter-trigger");
     const sourceFilterMenu = document.getElementById("source-filter-menu");
@@ -1372,7 +1816,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     const traceTitle = document.getElementById("trace-title");
     const traceSubtitle = document.getElementById("trace-subtitle");
     const traceSummary = document.getElementById("trace-summary");
-    const traceSections = document.getElementById("trace-sections");
+    const traceTree = document.getElementById("trace-tree");
+    const tracePanel = document.getElementById("trace-panel");
     const traceRelated = document.getElementById("trace-related");
     const emptyState = document.getElementById("empty-state");
     const downloadLinks = document.getElementById("download-links");
@@ -1398,6 +1843,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       "reverse_registration_collector": "Candidate sibling domains discovered through certificate transparency and RDAP overlap.",
       "asn_cidr_collector": "PTR-derived domains and roots discovered by pivoting through known ASN and CIDR network ranges.",
       "domain_enricher": "DNS and RDAP enrichment backfill that also materializes IP assets from resolved A and AAAA records.",
+      "ip_enricher": "PTR, ASN, organization, and CIDR enrichment backfill applied to canonical IP assets.",
       "crawler_collector": "Assets discovered by crawling links from already-discovered web pages."
     });
 
@@ -1560,6 +2006,46 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       syncSourceFilterUI();
     }
 
+    function hasActiveDomainFilters() {
+      return Boolean(state.search) || Boolean(state.domainKind) || Boolean(state.resolutionStatus) || state.sources.length > 0;
+    }
+
+    function buildDomainGroups(rows) {
+      const groups = [];
+      const byKey = new Map();
+
+      rows.forEach((row) => {
+        const key = row.registrable_domain || row.identifier;
+        if (!key) { return; }
+
+        let group = byKey.get(key);
+        if (!group) {
+          group = { key, rows: [] };
+          byKey.set(key, group);
+          groups.push(group);
+        }
+        group.rows.push(row);
+      });
+
+      groups.forEach((group) => {
+        const registrable = group.rows.find((row) => row.domain_kind === "registrable");
+        const others = group.rows.filter((row) => !registrable || row.asset_id !== registrable.asset_id);
+        group.rows = registrable ? [registrable].concat(others) : group.rows.slice();
+      });
+
+      return groups;
+    }
+
+    function isDomainGroupExpanded(groupKey) {
+      return hasActiveDomainFilters() || state.expandedDomainGroups.has(groupKey);
+    }
+
+    function displayedDomainRowCount(groups) {
+      return groups.reduce((count, group) => {
+        return count + 1 + (isDomainGroupExpanded(group.key) ? group.rows.length : 0);
+      }, 0);
+    }
+
     function normalize(value) { return String(value || "").toLowerCase(); }
 
     function describeSource(value) {
@@ -1567,6 +2053,10 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     }
 
     function formatDomainKind(value) {
+      return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function formatResolutionStatus(value) {
       return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
     }
 
@@ -1588,85 +2078,120 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       });
     }
 
+    function renderOwnershipBadge(value) {
+      const normalized = String(value || "").trim().toLowerCase();
+      const label = normalized ? humanizeKey(normalized) : "Unclassified";
+      const tone = normalized ? " ownership-" + normalized.replaceAll("_", "-") : "";
+      return "<span class=\"pill ownership-pill" + tone + "\">" + escapeHTML(label) + "</span>";
+    }
+
+    function renderEvidenceGroups(groups) {
+      if (!Array.isArray(groups) || groups.length === 0) {
+        return "";
+      }
+      return "<div class=\"detail-evidence-groups\">" + groups.map((group) => {
+        const items = Array.isArray(group.items) ? group.items : [];
+        return [
+          "<section class=\"detail-evidence-group\">",
+          "<div class=\"detail-preview-label\">" + escapeHTML(group.title || "Evidence") + "</div>",
+          items.length > 0
+            ? "<div class=\"detail-evidence-items\">" + items.map((item) => "<div class=\"detail-evidence-item\">" + escapeHTML(item) + "</div>").join("") + "</div>"
+            : "<div class=\"detail-evidence-item muted\">No exported values.</div>",
+          "</section>",
+        ].join("");
+      }).join("") + "</div>";
+    }
+
     function renderDetailPanel(row, run) {
       const trace = run && Array.isArray(run.traces)
         ? run.traces.find((t) => t.asset_id === row.asset_id)
         : null;
-      const detailPairs = parseDetails(row.details);
-      const sections = trace && Array.isArray(trace.sections) ? trace.sections : [];
+      const detailPairs = parseDetails(row.details).filter((pair) => pair.label !== "Ownership" && pair.label !== "Reason");
+      const previewPairs = detailPairs.slice(0, 4);
+      const groupedEvidence = renderEvidenceGroups(row.evidence_groups);
+      const contributors = trace && Array.isArray(trace.contributors) ? trace.contributors : [];
       const related = trace && Array.isArray(trace.related) ? trace.related : [];
+      const nodes = traceNodes(trace);
+      const observationCount = nodes.filter((node) => node.kind === "observation").length;
+      const relationCount = nodes.filter((node) => node.kind === "relation").length;
+      const enrichmentCount = nodes.filter((node) => node.kind === "enrichment").length;
+      const colSpan = row.asset_type === "ip" ? 8 : 7;
 
-      const provenanceHTML = [
-        "<div class=\"detail-card\">",
-        "<h4>Provenance</h4>",
-        "<div class=\"detail-kv\">",
-        kvRow("Asset ID", row.asset_id),
-        row.asset_type === "ip" ? kvRow("ASN", String(row.asn || "-")) : "",
-        row.asset_type === "ip" ? kvRow("Organization", row.organization || "-") : "",
-        row.asset_type === "ip" ? kvRow("PTR", row.ptr || "-") : "",
-        row.asset_type !== "ip" ? kvRow("Registrable Domain", row.registrable_domain || "-") : "",
-        kvRow("Enumeration", row.enumeration_id || "-"),
-        kvRow("Seed", row.seed_id || "-"),
-        kvRow("Status", row.status || "-"),
+      const identityBadges = [
+        row.asset_type === "domain" && row.domain_kind ? "<span class=\"pill pill-subtle\">" + escapeHTML(formatDomainKind(row.domain_kind)) + "</span>" : "",
+        row.asset_type === "domain" && row.registrable_domain ? "<span class=\"pill pill-subtle\">" + escapeHTML(row.registrable_domain) + "</span>" : "",
+        row.asset_type === "domain" && row.resolution_status ? "<span class=\"pill pill-subtle\">" + escapeHTML(formatResolutionStatus(row.resolution_status)) + "</span>" : "",
+        row.asset_type === "ip" && row.ptr ? "<span class=\"pill pill-subtle\">" + escapeHTML(row.ptr) + "</span>" : "",
+        renderOwnershipBadge(row.ownership_state),
+      ].filter(Boolean).join("");
+
+      const evidenceHTML = groupedEvidence || (previewPairs.length > 0
+        ? "<ul class=\"detail-preview-list\">" + previewPairs.map((pair) => {
+            return "<li><span class=\"detail-preview-label\">" + escapeHTML(pair.label) + "</span><span class=\"detail-preview-value\">" + escapeHTML(pair.value) + "</span></li>";
+          }).join("") + "</ul>"
+        : "<p class=\"muted\">No additional evidence preview was exported for this row.</p>");
+      const contributorSummary = [
+        "<div class=\"detail-summary-meta\">",
+        "<span><strong>Enumeration</strong> " + escapeHTML(row.enumeration_id || "-") + "</span>",
+        "<span><strong>Seed</strong> " + escapeHTML(row.seed_id || "-") + "</span>",
+        row.asset_type === "ip" ? "<span><strong>ASN</strong> " + escapeHTML(row.asn ? String(row.asn) : "-") + "</span>" : "",
+        row.asset_type === "ip" ? "<span><strong>Org</strong> " + escapeHTML(row.organization || "-") + "</span>" : "",
         "</div>",
-        "</div>"
+        "<div class=\"detail-summary-sources\">",
+        "<div><strong>Discovered By</strong>" + renderSourceCell(row.discovered_by || row.source) + "</div>",
+        "<div><strong>Enriched By</strong>" + renderSourceCell(row.enriched_by) + "</div>",
+        "</div>",
       ].join("");
 
-      let evidenceHTML = "";
-      if (detailPairs.length > 0) {
-        evidenceHTML = [
-          "<div class=\"detail-card\">",
-          "<h4>Evidence</h4>",
-          "<div class=\"detail-kv\">",
-          detailPairs.map((pair) => kvRow(pair.label, pair.value)).join(""),
-          "</div>",
-          "</div>"
-        ].join("");
-      }
+      const traceStats = [
+        contributors.length ? String(contributors.length) + " contributor" + (contributors.length === 1 ? "" : "s") : "",
+        observationCount ? String(observationCount) + " observation" + (observationCount === 1 ? "" : "s") : "",
+        relationCount ? String(relationCount) + " relation" + (relationCount === 1 ? "" : "s") : "",
+        enrichmentCount ? String(enrichmentCount) + " enrichment stage" + (enrichmentCount === 1 ? "" : "s") : "",
+      ].filter(Boolean);
 
-      let traceHTML = "";
-      if (sections.length > 0) {
-        traceHTML = sections.map((section) => {
-          const items = Array.isArray(section.items) ? section.items : [];
-          return [
-            "<div class=\"detail-card\">",
-            "<h4>" + escapeHTML(section.title || "Trace") + "</h4>",
-            "<ul class=\"detail-trace-items\">",
-            items.map((item) => "<li>" + escapeHTML(item) + "</li>").join(""),
-            "</ul>",
-            "</div>"
-          ].join("");
-        }).join("");
-      }
+      const relatedPreview = related.length > 0
+        ? "<div class=\"detail-related-inline\">" + related.slice(0, 3).map((link) => {
+            return "<span class=\"pill pill-subtle\">" + escapeHTML(link.identifier || link.asset_id) + "</span>";
+          }).join("") + (related.length > 3 ? "<span class=\"pill pill-subtle\">+" + String(related.length - 3) + " more</span>" : "") + "</div>"
+        : "<p class=\"muted\">No related assets were linked in this export.</p>";
 
-      let relatedHTML = "";
-      if (related.length > 0) {
-        relatedHTML = [
-          "<div class=\"detail-card\">",
-          "<h4>Related Results</h4>",
-          "<div class=\"detail-related-list\">",
-          related.map((link) => [
-            "<div class=\"detail-related-item\">",
-            "<div><strong>" + escapeHTML(link.identifier || link.asset_id) + "</strong> ",
-            "<span class=\"muted\">" + escapeHTML(link.label || "") + "</span></div>",
-            "<a href=\"" + escapeHTML(link.trace_path || "#") + "\" class=\"result-trace-link\" data-trace-link data-run-id=\"" + escapeHTML(state.runId) + "\" data-asset-id=\"" + escapeHTML(link.asset_id) + "\">Trace</a>",
-            "</div>"
-          ].join("")).join(""),
-          "</div>",
-          "</div>"
-        ].join("");
-      }
-
-      return "<td colspan=\"7\"><div class=\"detail-panel\">" + provenanceHTML + evidenceHTML + traceHTML + relatedHTML + "</div></td>";
-    }
-
-    function kvRow(label, value) {
-      return "<div class=\"detail-kv-row\"><span class=\"detail-kv-label\">" + escapeHTML(label) + "</span><span class=\"detail-kv-value\">" + escapeHTML(value) + "</span></div>";
+      return [
+        "<td colspan=\"" + String(colSpan) + "\">",
+        "<div class=\"detail-panel\">",
+        "<article class=\"detail-card detail-summary-card\">",
+        "<div class=\"detail-summary-head\">",
+        "<div>",
+        "<div class=\"eyebrow\">Inline Summary</div>",
+        "<h4>" + escapeHTML(row.identifier) + "</h4>",
+        "<p class=\"muted\">Asset " + escapeHTML(row.asset_id) + " · " + escapeHTML(row.status || "unknown") + "</p>",
+        "</div>",
+        "<div class=\"detail-summary-badges\">" + identityBadges + "</div>",
+        "</div>",
+        row.inclusion_reason ? "<p class=\"detail-summary-reason\">" + escapeHTML(row.inclusion_reason) + "</p>" : "<p class=\"detail-summary-reason muted\">No inclusion reason was exported for this asset.</p>",
+        contributorSummary,
+        "</article>",
+        "<article class=\"detail-card detail-compact-card\">",
+        "<h4>Evidence Preview</h4>",
+        evidenceHTML,
+        "</article>",
+        "<article class=\"detail-card detail-compact-card\">",
+        "<h4>Trace Summary</h4>",
+        (traceStats.length > 0 ? "<div class=\"detail-related-inline\">" + traceStats.map((item) => "<span class=\"pill pill-subtle\">" + escapeHTML(item) + "</span>").join("") + "</div>" : "<p class=\"muted\">Trace statistics are not available for this asset.</p>"),
+        relatedPreview,
+        "<div class=\"detail-actions\">",
+        "<a href=\"" + escapeHTML(row.trace_path || "#") + "\" class=\"result-trace-link\" data-trace-link data-run-id=\"" + escapeHTML(state.runId) + "\" data-asset-id=\"" + escapeHTML(row.asset_id) + "\">Open Trace</a>",
+        "</div>",
+        "</article>",
+        "</div>",
+        "</td>",
+      ].join("");
     }
 
     /* --- Trace View Rendering --- */
     function renderTraceSummary(trace) {
       const pills = [];
+      const nodes = traceNodes(trace);
       const contributors = Array.isArray(trace.contributors) ? trace.contributors : [];
       const uniqueContributorValues = (key) => {
         const seen = new Set();
@@ -1677,7 +2202,17 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       if (trace.asset_type) { pills.push("<span class=\"pill\">" + escapeHTML(trace.asset_type) + "</span>"); }
       if (trace.domain_kind) { pills.push("<span class=\"pill\">" + escapeHTML(formatDomainKind(trace.domain_kind)) + "</span>"); }
       if (trace.registrable_domain) { pills.push("<span class=\"pill\">" + escapeHTML(trace.registrable_domain) + "</span>"); }
-      if (trace.source) {
+      if (trace.resolution_status) { pills.push("<span class=\"pill\">" + escapeHTML(formatResolutionStatus(trace.resolution_status)) + "</span>"); }
+      if (trace.discovered_by) {
+        splitSources(trace.discovered_by).forEach((source) => {
+          pills.push("<span class=\"pill\">Discovered via " + escapeHTML(source) + "</span>");
+        });
+      }
+      if (trace.enriched_by) {
+        splitSources(trace.enriched_by).forEach((source) => {
+          pills.push("<span class=\"pill\">Enriched via " + escapeHTML(source) + "</span>");
+        });
+      } else if (trace.source && !trace.discovered_by) {
         splitSources(trace.source).forEach((source) => {
           pills.push("<span class=\"pill\">" + escapeHTML(source) + "</span>");
         });
@@ -1694,25 +2229,113 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         if (trace.enumeration_id) { pills.push("<span class=\"pill\">Enum " + escapeHTML(trace.enumeration_id) + "</span>"); }
         if (trace.seed_id) { pills.push("<span class=\"pill\">Seed " + escapeHTML(trace.seed_id) + "</span>"); }
       }
+      const observationCount = nodes.filter((node) => node.kind === "observation").length;
+      const relationCount = nodes.filter((node) => node.kind === "relation").length;
+      if (observationCount > 0) { pills.push("<span class=\"pill\">" + escapeHTML(String(observationCount)) + " observations</span>"); }
+      if (relationCount > 0) { pills.push("<span class=\"pill\">" + escapeHTML(String(relationCount)) + " relations</span>"); }
       return pills.join("");
     }
 
-    function renderTraceSections(trace) {
-      const sections = Array.isArray(trace.sections) ? trace.sections : [];
-      if (sections.length === 0) {
-        return "<article class=\"trace-card\"><h3>No Trace Sections</h3><p class=\"muted\">This result does not include exported trace details.</p></article>";
+    function traceNodes(trace) {
+      return trace && Array.isArray(trace.nodes) ? trace.nodes : [];
+    }
+
+    function ensureTraceNodeSelection(trace) {
+      const nodes = traceNodes(trace);
+      if (nodes.length === 0) {
+        state.traceNodeId = "";
+        return null;
       }
-      return sections.map((section) => {
-        const items = Array.isArray(section.items) ? section.items : [];
-        return [
-          "<article class=\"trace-card\">",
-          "<h3>", escapeHTML(section.title || "Trace"), "</h3>",
-          "<ul class=\"trace-items\">",
-          items.map((item) => "<li>" + escapeHTML(item) + "</li>").join(""),
-          "</ul>",
-          "</article>"
-        ].join("");
-      }).join("");
+      const existing = nodes.find((node) => node.id === state.traceNodeId);
+      if (existing) { return existing; }
+      state.traceNodeId = trace.root_node_id || nodes[0].id;
+      return nodes.find((node) => node.id === state.traceNodeId) || nodes[0];
+    }
+
+    function currentTraceNode(trace) {
+      return ensureTraceNodeSelection(trace);
+    }
+
+    function buildTraceChildren(trace) {
+      const children = new Map();
+      traceNodes(trace).forEach((node) => {
+        const parentKey = node.parent_id || "__root__";
+        if (!children.has(parentKey)) { children.set(parentKey, []); }
+        children.get(parentKey).push(node);
+      });
+      return children;
+    }
+
+    function renderTraceTree(trace) {
+      const nodes = traceNodes(trace);
+      const selected = ensureTraceNodeSelection(trace);
+      if (nodes.length === 0 || !selected) {
+        return "<div class=\"trace-panel-empty\"><p class=\"muted\">This result does not include exported trace nodes.</p></div>";
+      }
+
+      const children = buildTraceChildren(trace);
+      const rootParent = "__root__";
+      return "<div class=\"trace-tree-list\">" + renderTraceNodeBranch(children, rootParent, selected.id, 0) + "</div>";
+    }
+
+    function renderTraceNodeBranch(children, parentID, selectedID, depth) {
+      const nodes = children.get(parentID) || [];
+      return nodes.map((node) => renderTraceNodeEntry(node, children, selectedID, depth)).join("");
+    }
+
+    function renderTraceNodeEntry(node, children, selectedID, depth) {
+      const childHTML = renderTraceNodeBranch(children, node.id, selectedID, depth + 1);
+      const badges = [node.kind ? humanizeKey(node.kind) : ""].concat(Array.isArray(node.badges) ? node.badges : []).filter(Boolean);
+      return [
+        "<div class=\"trace-tree-node\" style=\"--trace-depth:" + String(depth) + "\">",
+        "<button type=\"button\" class=\"trace-node-button" + (node.id === selectedID ? " is-active" : "") + "\" data-trace-node-id=\"" + escapeHTML(node.id) + "\">",
+        "<span class=\"trace-node-copy\">",
+        "<span class=\"trace-node-label\">" + escapeHTML(node.label || "Trace Node") + "</span>",
+        node.subtitle ? "<span class=\"trace-node-subtitle\">" + escapeHTML(node.subtitle) + "</span>" : "",
+        "</span>",
+        badges.length > 0 ? "<span class=\"trace-node-badges\">" + badges.map((badge) => "<span class=\"pill pill-subtle\">" + escapeHTML(badge) + "</span>").join("") + "</span>" : "",
+        "</button>",
+        childHTML ? "<div class=\"trace-tree-children\">" + childHTML + "</div>" : "",
+        "</div>",
+      ].join("");
+    }
+
+    function renderTraceNodePanel(trace) {
+      const node = currentTraceNode(trace);
+      if (!node) {
+        return "<div class=\"trace-panel-empty\"><p class=\"muted\">Select a node to inspect its exported properties and evidence.</p></div>";
+      }
+
+      const details = Array.isArray(node.details) ? node.details : [];
+      const meta = [
+        node.kind ? "<span class=\"pill pill-subtle\">" + escapeHTML(humanizeKey(node.kind)) + "</span>" : "",
+        node.linked_asset_id ? "<span class=\"pill pill-subtle\">Asset " + escapeHTML(node.linked_asset_id) + "</span>" : "",
+        node.linked_observation_id ? "<span class=\"pill pill-subtle\">Observation " + escapeHTML(node.linked_observation_id) + "</span>" : "",
+        node.linked_relation_id ? "<span class=\"pill pill-subtle\">Relation " + escapeHTML(node.linked_relation_id) + "</span>" : "",
+      ].filter(Boolean).join("");
+
+      return [
+        "<article class=\"trace-panel-body\">",
+        "<div class=\"trace-panel-hero\">",
+        "<div>",
+        "<h3>" + escapeHTML(node.label || "Trace Node") + "</h3>",
+        node.subtitle ? "<p class=\"muted\">" + escapeHTML(node.subtitle) + "</p>" : "<p class=\"muted\">No subtitle exported for this node.</p>",
+        "</div>",
+        meta ? "<div class=\"trace-panel-meta\">" + meta + "</div>" : "",
+        "</div>",
+        details.length > 0 ? details.map((section) => renderTraceDetailSection(section)).join("") : "<div class=\"trace-card\"><h3>No Details</h3><p class=\"muted\">This node does not include additional exported details.</p></div>",
+        "</article>",
+      ].join("");
+    }
+
+    function renderTraceDetailSection(section) {
+      const items = Array.isArray(section.items) ? section.items : [];
+      return [
+        "<article class=\"trace-card\">",
+        "<h3>" + escapeHTML(section.title || "Trace Details") + "</h3>",
+        items.length > 0 ? "<ul class=\"trace-items\">" + items.map((item) => "<li>" + escapeHTML(item) + "</li>").join("") + "</ul>" : "<p class=\"muted\">No exported items.</p>",
+        "</article>",
+      ].join("");
     }
 
     function renderTraceRelated(trace) {
@@ -1737,13 +2360,17 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     function ensureTraceSelection(run, rows) {
       if (state.view !== "trace") { return; }
       const trace = currentTrace(run);
-      if (trace) { return; }
+      if (trace) {
+        ensureTraceNodeSelection(trace);
+        return;
+      }
       const firstTrace = run && Array.isArray(run.traces) ? run.traces[0] : null;
       const firstRow = rows[0] || null;
-      if (firstTrace) { state.traceAssetId = firstTrace.asset_id; return; }
-      if (firstRow) { state.traceAssetId = firstRow.asset_id; return; }
+      if (firstTrace) { state.traceAssetId = firstTrace.asset_id; state.traceNodeId = ""; return; }
+      if (firstRow) { state.traceAssetId = firstRow.asset_id; state.traceNodeId = ""; return; }
       state.view = "domains";
       state.traceAssetId = "";
+      state.traceNodeId = "";
     }
 
     function openTrace(runId, assetId) {
@@ -1751,6 +2378,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       state.runId = runId;
       state.view = "trace";
       state.traceAssetId = assetId;
+      state.traceNodeId = "";
       fillRunSelect();
       updateFiltersForRun();
       renderTable();
@@ -1765,6 +2393,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       else if (rows[0]) { state.view = "trace"; state.traceAssetId = rows[0].asset_id; }
       else if (Array.isArray(run.traces) && run.traces[0]) { state.view = "trace"; state.traceAssetId = run.traces[0].asset_id; }
       else { state.view = "domains"; state.traceAssetId = ""; }
+      state.traceNodeId = "";
       renderTable();
       syncHash();
     }
@@ -1801,6 +2430,10 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         })
         .filter((row) => !state.domainKind || row.domain_kind === state.domainKind)
         .filter((row) => {
+          if (!state.resolutionStatus || row.asset_type !== "domain") { return true; }
+          return row.resolution_status === state.resolutionStatus;
+        })
+        .filter((row) => {
           if (state.sources.length === 0) { return true; }
           const rowSources = splitSources(row.source);
           return state.sources.every((source) => rowSources.includes(source));
@@ -1809,8 +2442,9 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           if (!state.search) { return true; }
           return normalize([
             row.identifier, row.domain_kind, row.registrable_domain,
-            row.asset_type, row.source, row.enumeration_id, row.seed_id,
-            row.status, row.details
+            row.asset_type, row.source, row.discovered_by, row.enriched_by, row.enumeration_id, row.seed_id,
+            row.resolution_status,
+            row.status, row.details, row.ownership_state, row.inclusion_reason
           ].join(" ")).includes(state.search);
         })
         .slice()
@@ -1965,6 +2599,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     function renderTable() {
       const run = currentRun();
       const rows = visibleRows(run);
+      const domainGroups = state.view === "domains" ? buildDomainGroups(rows) : [];
+      const displayedCount = state.view === "domains" ? displayedDomainRowCount(domainGroups) : rows.length;
       ensureTraceSelection(run, rows);
       const trace = currentTrace(run);
       hideTooltip();
@@ -1974,10 +2610,16 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       document.getElementById("asset-count").textContent = String(run ? run.asset_count : 0);
       document.getElementById("enumeration-count").textContent = String(run ? run.enumeration_count : 0);
       document.getElementById("seed-count").textContent = String(run ? run.seed_count : 0);
-      document.getElementById("visible-count").textContent = String(rows.length);
+      document.getElementById("visible-count").textContent = String(displayedCount);
       document.getElementById("judge-accepted-count").textContent = String(run && run.judge_summary ? run.judge_summary.accepted_count || 0 : 0);
       document.getElementById("judge-discarded-count").textContent = String(run && run.judge_summary ? run.judge_summary.discarded_count || 0 : 0);
-      tableCaption.textContent = run ? "Showing " + rows.length + " of " + run.rows.length + " rows from " + run.label + "." : "No archived runs loaded.";
+      if (!run) {
+        tableCaption.textContent = "No archived runs loaded.";
+      } else if (state.view === "domains") {
+        tableCaption.textContent = "Showing " + domainGroups.length + " registrable domains from " + rows.length + " matching domain assets in " + run.label + ".";
+      } else {
+        tableCaption.textContent = "Showing " + rows.length + " of " + run.rows.length + " rows from " + run.label + ".";
+      }
 
       renderDownloads(run);
 
@@ -2000,25 +2642,30 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       traceViewButton.classList.toggle("is-active", showTrace);
 
       if (showTrace) {
+        ensureTraceNodeSelection(trace);
         traceTitle.textContent = trace.identifier || trace.asset_id || "Result Trace";
         traceSubtitle.textContent = "Trace for asset " + String(trace.asset_id || "unknown") + ". Follow related results to pivot across the exported dataset.";
         traceSummary.innerHTML = renderTraceSummary(trace);
-        traceSections.innerHTML = renderTraceSections(trace);
+        traceTree.innerHTML = renderTraceTree(trace);
+        tracePanel.innerHTML = renderTraceNodePanel(trace);
         traceRelated.innerHTML = renderTraceRelated(trace);
       } else {
         traceTitle.textContent = "Select a result";
         traceSubtitle.textContent = "Choose any result row to inspect its exported provenance, context, and related results.";
         traceSummary.innerHTML = "";
-        traceSections.innerHTML = "";
+        traceTree.innerHTML = "";
+        tracePanel.innerHTML = "<div class=\"trace-panel-empty\"><p class=\"muted\">No trace selected.</p></div>";
         traceRelated.innerHTML = "<p class=\"muted\">No trace selected.</p>";
       }
 
+      resolutionStatusField.hidden = !showDomains;
       if (showResults) {
         if (showDomains) {
         resultsHead.innerHTML = ` + "`" + `<tr>
           <th style="width:2.5rem"></th>
           <th><button type="button" data-key="identifier" data-tooltip="The domain or hostname identifier for this asset.">Identifier</button></th>
           <th><button type="button" data-key="domain_kind" data-tooltip="Whether this domain is a registrable root or a discovered subdomain.">Kind</button></th>
+          <th><button type="button" data-key="resolution_status" data-tooltip="Whether the domain currently resolves, was enriched but did not resolve, or has not been checked yet.">Resolution</button></th>
           <th><button type="button" data-key="source" data-tooltip="Collectors and enrichers that contributed this exported result.">Source</button></th>
           <th><button type="button" data-key="status" data-tooltip="Merged enumeration status for the contributing discovery runs.">Status</button></th>
           <th><button type="button" data-key="discovery_date" data-tooltip="When this result was first observed in the current exported run.">Discovered</button></th>
@@ -2046,46 +2693,69 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         });
       }
       
-      let lastDomain = null;
-        rows.forEach((row) => {
-          const group = row.registrable_domain || "";
-          if (group && group !== lastDomain) {
-            lastDomain = group;
-            const groupCount = rows.filter((r) => r.registrable_domain === group).length;
-            const groupTr = document.createElement("tr");
-            groupTr.className = "domain-group-row";
-            groupTr.innerHTML = "<td colspan=\"7\">" + escapeHTML(group) + " <span class=\"pill\">" + groupCount + " asset" + (groupCount === 1 ? "" : "s") + "</span></td>";
-            body.appendChild(groupTr);
-          } else if (!group && lastDomain !== "__IP__") {
-            lastDomain = "__IP__";
+      if (showDomains) {
+        domainGroups.forEach((group) => {
+          const expanded = isDomainGroupExpanded(group.key);
+          const groupTr = document.createElement("tr");
+          groupTr.className = "domain-group-row";
+          groupTr.innerHTML = [
+            "<td colspan=\"7\">",
+            "<div class=\"domain-group-summary\">",
+            "<button type=\"button\" class=\"domain-group-toggle\" data-domain-group=\"" + escapeHTML(group.key) + "\" aria-expanded=\"" + (expanded ? "true" : "false") + "\">" + (expanded ? "▼" : "▶") + "</button>",
+            "<div class=\"domain-group-copy\">",
+            "<span>" + escapeHTML(group.key) + "</span>",
+            "<span class=\"pill\">" + group.rows.length + " asset" + (group.rows.length === 1 ? "" : "s") + "</span>",
+            "</div>",
+            "</div>",
+            "</td>",
+          ].join("");
+          body.appendChild(groupTr);
+
+          if (!expanded) {
+            return;
           }
 
-          const discovered = row.discovery_date ? new Date(row.discovery_date).toLocaleString() : "";
-          const kindLabel = row.domain_kind ? formatDomainKind(row.domain_kind) : row.asset_type || "-";
-          const isExpanded = state.expandedRows.has(row.asset_id);
+          group.rows.forEach((row) => {
+            const discovered = row.discovery_date ? new Date(row.discovery_date).toLocaleString() : "";
+            const kindLabel = row.domain_kind ? formatDomainKind(row.domain_kind) : row.asset_type || "-";
+            const isExpanded = state.expandedRows.has(row.asset_id);
 
-          const tr = document.createElement("tr");
-          if (row.asset_type === "domain") {
+            const tr = document.createElement("tr");
             tr.innerHTML = [
               "<td><button type=\"button\" class=\"detail-toggle\" data-asset-id=\"" + escapeHTML(row.asset_id) + "\">" + (isExpanded ? "▼" : "▶") + "</button></td>",
               "<td><strong>" + escapeHTML(row.identifier) + "</strong></td>",
               "<td><span class=\"pill\">" + escapeHTML(kindLabel) + "</span></td>",
+              "<td><span class=\"pill pill-subtle\">" + escapeHTML(formatResolutionStatus(row.resolution_status || "-")) + "</span></td>",
               "<td>" + renderSourceCell(row.source) + "</td>",
               "<td>" + escapeHTML(row.status || "-") + "</td>",
               "<td>" + escapeHTML(discovered) + "</td>",
             ].join("");
-          } else {
-            tr.innerHTML = [
-              "<td><button type=\"button\" class=\"detail-toggle\" data-asset-id=\"" + escapeHTML(row.asset_id) + "\">" + (isExpanded ? "▼" : "▶") + "</button></td>",
-              "<td><strong>" + escapeHTML(row.identifier) + "</strong></td>",
-              "<td>" + escapeHTML(row.asn ? String(row.asn) : "-") + "</td>",
-              "<td>" + escapeHTML(row.organization || "-") + "</td>",
-              "<td><span class=\"pill pill-subtle\">" + escapeHTML(row.ptr || "-") + "</span></td>",
-              "<td>" + renderSourceCell(row.source) + "</td>",
-              "<td>" + escapeHTML(row.status || "-") + "</td>",
-              "<td>" + escapeHTML(discovered) + "</td>",
-            ].join("");
-          }
+            body.appendChild(tr);
+
+            if (isExpanded) {
+              const detailTr = document.createElement("tr");
+              detailTr.className = "detail-row";
+              detailTr.innerHTML = renderDetailPanel(row, run);
+              body.appendChild(detailTr);
+            }
+          });
+        });
+      } else {
+        rows.forEach((row) => {
+          const discovered = row.discovery_date ? new Date(row.discovery_date).toLocaleString() : "";
+          const isExpanded = state.expandedRows.has(row.asset_id);
+
+          const tr = document.createElement("tr");
+          tr.innerHTML = [
+            "<td><button type=\"button\" class=\"detail-toggle\" data-asset-id=\"" + escapeHTML(row.asset_id) + "\">" + (isExpanded ? "▼" : "▶") + "</button></td>",
+            "<td><strong>" + escapeHTML(row.identifier) + "</strong></td>",
+            "<td>" + escapeHTML(row.asn ? String(row.asn) : "-") + "</td>",
+            "<td>" + escapeHTML(row.organization || "-") + "</td>",
+            "<td><span class=\"pill pill-subtle\">" + escapeHTML(row.ptr || "-") + "</span></td>",
+            "<td>" + renderSourceCell(row.source) + "</td>",
+            "<td>" + escapeHTML(row.status || "-") + "</td>",
+            "<td>" + escapeHTML(discovered) + "</td>",
+          ].join("");
           body.appendChild(tr);
 
           if (isExpanded) {
@@ -2097,7 +2767,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         });
       }
 
-      emptyState.style.display = showResults && rows.length === 0 ? "block" : "none";
+      emptyState.style.display = showResults && (showDomains ? domainGroups.length === 0 : rows.length === 0) ? "block" : "none";
       updateSortIndicators();
       renderLLMSummary(run);
     }
@@ -2105,11 +2775,17 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     function updateFiltersForRun() {
       const run = currentRun();
       const rows = run ? run.rows : [];
-            refillFilter(domainKindFilter, uniqueValues(rows, "domain_kind"), "All domain kinds", state.domainKind);
+      const domainRows = rows.filter((row) => row.asset_type === "domain");
+      refillFilter(domainKindFilter, uniqueValues(rows, "domain_kind"), "All domain kinds", state.domainKind);
       Array.from(domainKindFilter.options).forEach((option) => {
         if (option.value) { option.textContent = formatDomainKind(option.value); }
       });
       state.domainKind = domainKindFilter.value;
+      refillFilter(resolutionStatusFilter, uniqueValues(domainRows, "resolution_status"), "All resolution states", state.resolutionStatus);
+      Array.from(resolutionStatusFilter.options).forEach((option) => {
+        if (option.value) { option.textContent = formatResolutionStatus(option.value); }
+      });
+      state.resolutionStatus = resolutionStatusFilter.value;
       refillSourceFilter(rows);
     }
 
@@ -2120,6 +2796,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         const labels = {
           identifier: "Identifier",
           domain_kind: "Kind",
+          resolution_status: "Resolution",
           asset_type: "Type",
           asn: "ASN",
           organization: "Organization",
@@ -2144,6 +2821,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     runSelect.addEventListener("change", (event) => {
       state.runId = event.target.value;
       state.expandedRows.clear();
+      state.expandedDomainGroups.clear();
+      state.traceNodeId = "";
       updateFiltersForRun();
       if (state.view === "trace") {
         const run = currentRun();
@@ -2158,13 +2837,14 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     });
 
     searchInput.addEventListener("input", (event) => { state.search = normalize(event.target.value); renderTable(); });
-        domainKindFilter.addEventListener("change", (event) => { state.domainKind = event.target.value; renderTable(); });
+    domainKindFilter.addEventListener("change", (event) => { state.domainKind = event.target.value; renderTable(); });
+    resolutionStatusFilter.addEventListener("change", (event) => { state.resolutionStatus = event.target.value; renderTable(); });
 
-    domainsViewButton.addEventListener("click", () => { state.view = "domains"; renderTable(); syncHash(); });
-    ipsViewButton.addEventListener("click", () => { state.view = "ips"; renderTable(); syncHash(); });
-    judgeViewButton.addEventListener("click", () => { state.view = "judge"; renderTable(); syncHash(); });
+    domainsViewButton.addEventListener("click", () => { state.view = "domains"; state.traceNodeId = ""; renderTable(); syncHash(); });
+    ipsViewButton.addEventListener("click", () => { state.view = "ips"; state.traceNodeId = ""; renderTable(); syncHash(); });
+    judgeViewButton.addEventListener("click", () => { state.view = "judge"; state.traceNodeId = ""; renderTable(); syncHash(); });
     traceViewButton.addEventListener("click", () => { openTraceFromCurrentSelection(); });
-    traceBackButton.addEventListener("click", () => { state.view = "domains"; renderTable(); syncHash(); });
+    traceBackButton.addEventListener("click", () => { state.view = "domains"; state.traceNodeId = ""; renderTable(); syncHash(); });
 
     sourceFilter.addEventListener("click", (event) => { event.stopPropagation(); });
 
@@ -2193,8 +2873,27 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         return;
       }
 
+      const groupToggle = event.target.closest("[data-domain-group]");
+      if (groupToggle) {
+        const groupKey = groupToggle.dataset.domainGroup || "";
+        if (!groupKey || hasActiveDomainFilters()) {
+          return;
+        }
+        if (state.expandedDomainGroups.has(groupKey)) { state.expandedDomainGroups.delete(groupKey); }
+        else { state.expandedDomainGroups.add(groupKey); }
+        renderTable();
+        return;
+      }
+
       const link = event.target.closest("[data-trace-link]");
       if (link) { event.preventDefault(); openTrace(link.dataset.runId || state.runId, link.dataset.assetId); return; }
+
+      const traceNode = event.target.closest("[data-trace-node-id]");
+      if (traceNode) {
+        state.traceNodeId = traceNode.dataset.traceNodeId || "";
+        renderTable();
+        return;
+      }
 
       sourceFilterMenu.hidden = true;
       sourceFilter.classList.remove("is-open");
@@ -2225,6 +2924,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       state.view = next.view;
       if (next.runId) { state.runId = next.runId; }
       state.traceAssetId = next.assetId;
+      state.traceNodeId = "";
       fillRunSelect();
       updateFiltersForRun();
       renderTable();
