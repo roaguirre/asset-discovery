@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -376,7 +377,14 @@ func mergeAssetIntoCanonical(existing *Asset, incoming Asset, observationKind Ob
 	}
 
 	mergedOwnership, incomingWins := mergeOwnershipState(existing.OwnershipState, incoming.OwnershipState)
-	existing.InclusionReason = mergeInclusionReason(existing.InclusionReason, incoming.InclusionReason, incomingWins)
+	existing.InclusionReason = mergeInclusionReason(
+		existing.InclusionReason,
+		incoming.InclusionReason,
+		incomingWins,
+		observationKind,
+		existing.Provenance,
+		existing.Source,
+	)
 	if existing.InclusionReason == "" {
 		existing.InclusionReason = defaultInclusionReason(incoming)
 	}
@@ -447,17 +455,111 @@ func mergeOwnershipState(existing, incoming OwnershipState) (OwnershipState, boo
 	}
 }
 
-func mergeInclusionReason(existing, incoming string, incomingWins bool) string {
+func mergeInclusionReason(
+	existing string,
+	incoming string,
+	incomingWins bool,
+	observationKind ObservationKind,
+	discoveryProvenance []AssetProvenance,
+	fallbackSource string,
+) string {
 	existing = strings.TrimSpace(existing)
 	incoming = strings.TrimSpace(incoming)
-	switch {
-	case incomingWins && incoming != "":
-		return incoming
-	case existing != "":
-		return existing
-	default:
+
+	existingKind := classifyInclusionReason(existing)
+	incomingKind := classifyInclusionReason(incoming)
+
+	if observationKind == ObservationKindEnrichment {
+		if existing != "" {
+			return existing
+		}
+		if derived := summarizeDiscoveryInclusionReason(discoveryProvenance, fallbackSource); derived != "" {
+			return derived
+		}
 		return incoming
 	}
+
+	switch {
+	case incomingKind == inclusionReasonExplicit && (existingKind != inclusionReasonExplicit || incomingWins):
+		return incoming
+	case existingKind == inclusionReasonExplicit:
+		return existing
+	default:
+		if derived := summarizeDiscoveryInclusionReason(discoveryProvenance, fallbackSource); derived != "" {
+			return derived
+		}
+		if existing != "" {
+			return existing
+		}
+		return incoming
+	}
+}
+
+type inclusionReasonKind int
+
+const (
+	inclusionReasonEmpty inclusionReasonKind = iota
+	inclusionReasonGeneric
+	inclusionReasonExplicit
+)
+
+func classifyInclusionReason(reason string) inclusionReasonKind {
+	reason = strings.TrimSpace(reason)
+	switch {
+	case reason == "":
+		return inclusionReasonEmpty
+	case strings.HasPrefix(reason, "Discovered via "):
+		return inclusionReasonGeneric
+	case strings.HasPrefix(reason, "Supported by ") && strings.Contains(reason, " discovery observations"):
+		return inclusionReasonGeneric
+	default:
+		return inclusionReasonExplicit
+	}
+}
+
+func summarizeDiscoveryInclusionReason(provenance []AssetProvenance, fallbackSource string) string {
+	observationCount := 0
+	sourceValues := make([]string, 0, len(provenance))
+	seenSources := make(map[string]struct{}, len(provenance))
+
+	for _, item := range provenance {
+		if item.AssetID == "" && item.EnumerationID == "" && item.Source == "" && item.DiscoveryDate.IsZero() {
+			continue
+		}
+		observationCount++
+
+		source := strings.TrimSpace(strings.ToLower(item.Source))
+		if source == "" {
+			continue
+		}
+		if _, exists := seenSources[source]; exists {
+			continue
+		}
+		seenSources[source] = struct{}{}
+		sourceValues = append(sourceValues, source)
+	}
+
+	sort.Strings(sourceValues)
+	if len(sourceValues) == 0 {
+		sourceValues = splitSourceValues(fallbackSource)
+	}
+	if observationCount == 0 {
+		observationCount = len(sourceValues)
+	}
+	if observationCount == 0 {
+		return ""
+	}
+	if observationCount == 1 && len(sourceValues) > 0 {
+		return "Discovered via " + sourceValues[0]
+	}
+	if len(sourceValues) == 0 {
+		return fmt.Sprintf("Supported by %d discovery observations", observationCount)
+	}
+	return fmt.Sprintf(
+		"Supported by %d discovery observations from %s",
+		observationCount,
+		strings.Join(sourceValues, ", "),
+	)
 }
 
 func mergeSources(existing string, incoming string) string {

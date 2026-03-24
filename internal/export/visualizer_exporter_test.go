@@ -660,6 +660,54 @@ func TestVisualizerExporter_TracePreservesMergedContributorLineage(t *testing.T)
 	}
 }
 
+func TestBuildVisualizerRun_MergedDiscoveryTraceUsesProvenanceSummaryAndRichGroupNodes(t *testing.T) {
+	ts := time.Date(2026, time.March, 24, 2, 0, 0, 0, time.FixedZone("-0300", -3*60*60))
+	run := buildVisualizerRun("run-gesprobira", ts, Downloads{}, sampleMergedDiscoveryTraceContext(ts))
+
+	row := findRowByIdentifier(run.Rows, "gesprobira.cl")
+	if row == nil {
+		t.Fatalf("expected gesprobira.cl row to be present, got %+v", run.Rows)
+	}
+
+	expectedReason := "Supported by 4 discovery observations from crt.sh, dns_collector, sitemap_collector, wayback_collector"
+	if row.InclusionReason != expectedReason {
+		t.Fatalf("expected merged discovery reason, got %+v", row)
+	}
+
+	trace := findTraceByAssetID(run.Traces, row.AssetID)
+	if trace == nil {
+		t.Fatalf("expected trace for gesprobira.cl to be exported, got %+v", run.Traces)
+	}
+
+	if !traceNodeSectionContains(trace.Nodes, "gesprobira.cl", "Ownership", "Inclusion reason: "+expectedReason) {
+		t.Fatalf("expected root ownership card to use merged discovery reason, got %+v", trace.Nodes)
+	}
+	if countTraceNodesByKind(trace.Nodes, "seed") != 1 {
+		t.Fatalf("expected one seed node for the merged contributors, got %+v", trace.Nodes)
+	}
+	if countTraceNodesByKind(trace.Nodes, "contributor") != 4 {
+		t.Fatalf("expected one contributor child per discovery provenance entry, got %+v", trace.Nodes)
+	}
+	if !traceNodeSectionContains(trace.Nodes, "Observations", "Observation Summary", "Total observations: 5") {
+		t.Fatalf("expected observations group summary to be exported, got %+v", trace.Nodes)
+	}
+	if !traceNodeSectionContains(trace.Nodes, "Observations", "Observation Summary", "Discovery observations: 4") {
+		t.Fatalf("expected observations group to count discovery observations, got %+v", trace.Nodes)
+	}
+	if !traceNodeSectionContains(trace.Nodes, "Seed Context", "Seed Summary", "Unique seeds: 1") {
+		t.Fatalf("expected seed group summary to be exported, got %+v", trace.Nodes)
+	}
+	if !traceNodeSectionContainsWithKind(trace.Nodes, "contributor", "sitemap_collector", "Contributor", "Enumeration ID: enum-1") {
+		t.Fatalf("expected contributor child node details to be preserved, got %+v", trace.Nodes)
+	}
+	if !traceNodeSectionContains(trace.Nodes, "Relations", "Relation Summary", "Total relations: 1") {
+		t.Fatalf("expected relations group summary to be exported, got %+v", trace.Nodes)
+	}
+	if !traceNodeSectionContains(trace.Nodes, "Enrichment", "Enrichment Summary", "Stage names: domain_enricher") {
+		t.Fatalf("expected enrichment group summary to be exported, got %+v", trace.Nodes)
+	}
+}
+
 func TestVisualizerExporter_PreservesReconsiderationJudgeGroupAndFinalWaveAssets(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "visualizer.html")
 	ts := time.Date(2026, time.March, 18, 11, 0, 0, 0, time.FixedZone("-0300", -3*60*60))
@@ -947,6 +995,106 @@ func sampleMergedVisualizerContext(ts time.Time) *models.PipelineContext {
 	}
 }
 
+func sampleMergedDiscoveryTraceContext(ts time.Time) *models.PipelineContext {
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "Gesprobira",
+				Domains:     []string{"gesprobira.cl"},
+				Tags:        []string{"production"},
+			},
+		},
+		Enumerations: []models.Enumeration{
+			{
+				ID:        "enum-1",
+				SeedID:    "seed-1",
+				Status:    "running",
+				CreatedAt: ts.Add(-5 * time.Minute),
+				UpdatedAt: ts.Add(-4 * time.Minute),
+			},
+		},
+	}
+
+	pCtx.AppendAssets(
+		models.Asset{
+			ID:            "dom-sitemap",
+			EnumerationID: "enum-1",
+			Type:          models.AssetTypeDomain,
+			Identifier:    "gesprobira.cl",
+			Source:        "sitemap_collector",
+			DiscoveryDate: ts,
+		},
+		models.Asset{
+			ID:            "dom-dns",
+			EnumerationID: "enum-1",
+			Type:          models.AssetTypeDomain,
+			Identifier:    "gesprobira.cl",
+			Source:        "dns_collector",
+			DiscoveryDate: ts.Add(5 * time.Second),
+		},
+		models.Asset{
+			ID:            "dom-wayback",
+			EnumerationID: "enum-1",
+			Type:          models.AssetTypeDomain,
+			Identifier:    "gesprobira.cl",
+			Source:        "wayback_collector",
+			DiscoveryDate: ts.Add(10 * time.Second),
+		},
+		models.Asset{
+			ID:            "dom-crtsh",
+			EnumerationID: "enum-1",
+			Type:          models.AssetTypeDomain,
+			Identifier:    "gesprobira.cl",
+			Source:        "crt.sh",
+			DiscoveryDate: ts.Add(15 * time.Second),
+		},
+		models.Asset{
+			ID:            "ip-1",
+			EnumerationID: "enum-1",
+			Type:          models.AssetTypeIP,
+			Identifier:    "104.21.52.57",
+			Source:        "domain_enricher",
+			DiscoveryDate: ts.Add(25 * time.Second),
+		},
+	)
+
+	domainAssetID := findCanonicalAssetID(pCtx.Assets, models.AssetTypeDomain, "gesprobira.cl")
+	if domainAssetID == "" {
+		return pCtx
+	}
+
+	pCtx.AppendAssetObservations(models.AssetObservation{
+		ID:            "obs-domain-enricher-1",
+		Kind:          models.ObservationKindEnrichment,
+		AssetID:       domainAssetID,
+		EnumerationID: "enum-1",
+		Type:          models.AssetTypeDomain,
+		Identifier:    "gesprobira.cl",
+		Source:        "domain_enricher",
+		DiscoveryDate: ts.Add(20 * time.Second),
+		DomainDetails: &models.DomainDetails{},
+		EnrichmentStates: map[string]models.EnrichmentState{
+			"domain_enricher": {Status: "completed", UpdatedAt: ts.Add(20 * time.Second)},
+		},
+	})
+	pCtx.AppendAssetRelations(models.AssetRelation{
+		ID:             "rel-1",
+		FromAssetType:  models.AssetTypeDomain,
+		FromIdentifier: "gesprobira.cl",
+		ToAssetType:    models.AssetTypeIP,
+		ToIdentifier:   "104.21.52.57",
+		EnumerationID:  "enum-1",
+		Source:         "domain_enricher",
+		Kind:           "dns_a",
+		Label:          "Resolved IP",
+		Reason:         "Resolved from gesprobira.cl via A",
+		DiscoveryDate:  ts.Add(25 * time.Second),
+	})
+
+	return pCtx
+}
+
 func findTraceByAssetID(traces []lineage.Trace, assetID string) *lineage.Trace {
 	for i := range traces {
 		if traces[i].AssetID == assetID {
@@ -1007,6 +1155,46 @@ func traceNodeSectionContains(nodes []lineage.TraceNode, label, title, fragment 
 		}
 	}
 	return false
+}
+
+func traceNodeSectionContainsWithKind(nodes []lineage.TraceNode, kind, label, title, fragment string) bool {
+	for _, node := range nodes {
+		if node.Kind != kind || node.Label != label {
+			continue
+		}
+		if traceSectionContains(node.Details, title, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func countTraceNodesByKind(nodes []lineage.TraceNode, kind string) int {
+	count := 0
+	for _, node := range nodes {
+		if node.Kind == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func findRowByIdentifier(rows []Row, identifier string) *Row {
+	for i := range rows {
+		if rows[i].Identifier == identifier {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func findCanonicalAssetID(assets []models.Asset, assetType models.AssetType, identifier string) string {
+	for _, asset := range assets {
+		if asset.Type == assetType && asset.Identifier == identifier {
+			return asset.ID
+		}
+	}
+	return ""
 }
 
 func hasEvidenceGroup(groups []EvidenceGroup, title, itemFragment string) bool {

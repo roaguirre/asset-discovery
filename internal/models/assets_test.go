@@ -54,6 +54,121 @@ func TestPipelineContext_AppendAssetsPreservesUncertainOwnershipOverAssociatedIn
 	}
 }
 
+func TestPipelineContext_AppendAssetsSummarizesMergedDiscoveryReasons(t *testing.T) {
+	pCtx := &PipelineContext{}
+	pCtx.AppendAssets(
+		Asset{
+			ID:            "dom-sitemap",
+			EnumerationID: "enum-1",
+			Type:          AssetTypeDomain,
+			Identifier:    "gesprobira.cl",
+			Source:        "sitemap_collector",
+		},
+		Asset{
+			ID:            "dom-dns",
+			EnumerationID: "enum-1",
+			Type:          AssetTypeDomain,
+			Identifier:    "gesprobira.cl",
+			Source:        "dns_collector",
+		},
+	)
+
+	if len(pCtx.Assets) != 1 {
+		t.Fatalf("expected one canonical asset, got %+v", pCtx.Assets)
+	}
+
+	if got := pCtx.Assets[0].InclusionReason; got != "Supported by 2 discovery observations from dns_collector, sitemap_collector" {
+		t.Fatalf("expected merged discovery summary, got %+v", pCtx.Assets[0])
+	}
+}
+
+func TestPipelineContext_AppendAssetsPreservesExplicitInclusionReasonsOverGenericDiscoveryReasons(t *testing.T) {
+	explicit := Asset{
+		ID:              "dom-explicit",
+		EnumerationID:   "enum-1",
+		Type:            AssetTypeDomain,
+		Identifier:      "api.example.com",
+		Source:          "dns_collector",
+		InclusionReason: "Resolved from example.com via DNS",
+	}
+	generic := Asset{
+		ID:            "dom-generic",
+		EnumerationID: "enum-1",
+		Type:          AssetTypeDomain,
+		Identifier:    "api.example.com",
+		Source:        "sitemap_collector",
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		assets []Asset
+	}{
+		{
+			name:   "generic then explicit",
+			assets: []Asset{generic, explicit},
+		},
+		{
+			name:   "explicit then generic",
+			assets: []Asset{explicit, generic},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			pCtx := &PipelineContext{}
+			pCtx.AppendAssets(testCase.assets...)
+
+			if len(pCtx.Assets) != 1 {
+				t.Fatalf("expected one canonical asset, got %+v", pCtx.Assets)
+			}
+			if got := pCtx.Assets[0].InclusionReason; got != explicit.InclusionReason {
+				t.Fatalf("expected explicit inclusion reason to win, got %+v", pCtx.Assets[0])
+			}
+		})
+	}
+}
+
+func TestPipelineContext_AppendAssetObservationsPreservesDiscoveryReasonDuringEnrichment(t *testing.T) {
+	pCtx := &PipelineContext{}
+	pCtx.AppendAssets(
+		Asset{
+			ID:            "ip-dns",
+			EnumerationID: "enum-1",
+			Type:          AssetTypeIP,
+			Identifier:    "203.0.113.10",
+			Source:        "dns_collector",
+		},
+		Asset{
+			ID:            "ip-domain-enricher",
+			EnumerationID: "enum-1",
+			Type:          AssetTypeIP,
+			Identifier:    "203.0.113.10",
+			Source:        "domain_enricher",
+		},
+	)
+
+	if len(pCtx.Assets) != 1 {
+		t.Fatalf("expected one canonical asset before enrichment, got %+v", pCtx.Assets)
+	}
+
+	pCtx.AppendAssetObservations(AssetObservation{
+		ID:              "obs-ip-enricher",
+		Kind:            ObservationKindEnrichment,
+		AssetID:         pCtx.Assets[0].ID,
+		EnumerationID:   "enum-1",
+		Type:            AssetTypeIP,
+		Identifier:      "203.0.113.10",
+		Source:          "ip_enricher",
+		OwnershipState:  OwnershipStateUncertain,
+		InclusionReason: "Observed behind an in-scope domain, but PTR points to vps.example.net",
+	})
+
+	if got := pCtx.Assets[0].OwnershipState; got != OwnershipStateUncertain {
+		t.Fatalf("expected enrichment observation to update ownership state, got %+v", pCtx.Assets[0])
+	}
+	if got := pCtx.Assets[0].InclusionReason; got != "Supported by 2 discovery observations from dns_collector, domain_enricher" {
+		t.Fatalf("expected discovery summary to be preserved during enrichment, got %+v", pCtx.Assets[0])
+	}
+}
+
 func TestDomainResolutionStatusForAsset(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string

@@ -19,6 +19,14 @@ type visualizerJudgeGroupAggregate struct {
 	outcomes    map[string]models.JudgeCandidateOutcome
 }
 
+type traceSeedGroup struct {
+	Key          string
+	SeedID       string
+	SeedLabel    string
+	Seed         models.Seed
+	Contributors []TraceContributor
+}
+
 func BuildJudgeSummary(evaluations []models.JudgeEvaluation) *JudgeSummary {
 	if len(evaluations) == 0 {
 		return nil
@@ -347,6 +355,7 @@ func buildTraceNodes(
 			Label:         "Observations",
 			Subtitle:      fmt.Sprintf("%d supporting observations", len(observations)),
 			LinkedAssetID: asset.ID,
+			Details:       buildObservationGroupTraceDetails(observations),
 		})
 		sort.SliceStable(observations, func(i, j int) bool {
 			if observations[i].DiscoveryDate.Equal(observations[j].DiscoveryDate) {
@@ -376,30 +385,48 @@ func buildTraceNodes(
 	}
 
 	if len(contributors) > 0 {
+		seedGroups := groupTraceContributorsBySeed(contributors, seedByID)
 		groupID := rootID + ":seeds"
 		nodes = append(nodes, TraceNode{
 			ID:            groupID,
 			ParentID:      rootID,
 			Kind:          "group",
 			Label:         "Seed Context",
-			Subtitle:      fmt.Sprintf("%d contributing seeds", len(uniqueTraceContributorValues(contributors, func(item TraceContributor) string { return item.SeedID }))),
+			Subtitle:      fmt.Sprintf("%d contributing seeds", len(seedGroups)),
 			LinkedAssetID: asset.ID,
+			Details:       buildSeedGroupTraceDetails(seedGroups),
 		})
-		for _, contributor := range contributors {
-			seed := seedByID[contributor.SeedID]
+		for _, seedGroup := range seedGroups {
+			seedID := seedGroup.SeedID
+			if seedID == "" {
+				seedID = seedGroup.Key
+			}
 			nodes = append(nodes, TraceNode{
-				ID:            "seed:" + contributor.SeedID + ":" + contributor.AssetID,
+				ID:            "seed:" + seedID,
 				ParentID:      groupID,
 				Kind:          "seed",
-				Label:         contributor.SeedLabel,
-				Subtitle:      contributor.SeedID,
-				Badges:        compactTraceValues(strings.Join(seed.Domains, ", "), FormatDateTime(contributor.DiscoveryDate)),
+				Label:         seedGroup.SeedLabel,
+				Subtitle:      seedGroup.SeedID,
+				Badges:        compactTraceValues(strings.Join(seedGroup.Seed.Domains, ", "), fmt.Sprintf("%d contributors", len(seedGroup.Contributors))),
 				LinkedAssetID: asset.ID,
-				Details: []TraceSection{
-					{Title: "Seed", Items: compactTraceValues("Seed ID: "+contributor.SeedID, "Domains: "+strings.Join(seed.Domains, ", "), "Source: "+contributor.Source)},
-					{Title: "Evidence", Items: formatSeedEvidence(seed.Evidence)},
-				},
+				Details:       buildSeedTraceDetails(seedGroup),
 			})
+			for index, contributor := range seedGroup.Contributors {
+				contributorLabel := contributor.Source
+				if contributorLabel == "" {
+					contributorLabel = "Contributor"
+				}
+				nodes = append(nodes, TraceNode{
+					ID:            fmt.Sprintf("seed:%s:contributor:%d", seedID, index),
+					ParentID:      "seed:" + seedID,
+					Kind:          "contributor",
+					Label:         contributorLabel,
+					Subtitle:      contributor.AssetID,
+					Badges:        compactTraceValues("Enum "+contributor.EnumerationID, FormatDateTime(contributor.DiscoveryDate)),
+					LinkedAssetID: contributor.AssetID,
+					Details:       buildContributorTraceDetails(contributor),
+				})
+			}
 		}
 	}
 
@@ -412,6 +439,7 @@ func buildTraceNodes(
 			Label:         "Relations",
 			Subtitle:      fmt.Sprintf("%d linked discovery edges", len(relations)),
 			LinkedAssetID: asset.ID,
+			Details:       buildRelationGroupTraceDetails(asset.ID, relations),
 		})
 		sort.SliceStable(relations, func(i, j int) bool {
 			if relations[i].DiscoveryDate.Equal(relations[j].DiscoveryDate) {
@@ -462,6 +490,7 @@ func buildTraceNodes(
 			Label:         "Enrichment",
 			Subtitle:      "Runtime cache and enrichment results",
 			LinkedAssetID: asset.ID,
+			Details:       buildEnrichmentGroupTraceDetails(asset),
 		})
 		stateKeys := make([]string, 0, len(asset.EnrichmentStates))
 		for key := range asset.EnrichmentStates {
@@ -629,6 +658,330 @@ func buildMergedSeedTraceItems(contributors []TraceContributor, seedByID map[str
 	return items
 }
 
+func buildObservationGroupTraceDetails(observations []models.AssetObservation) []TraceSection {
+	if len(observations) == 0 {
+		return nil
+	}
+
+	discoveryCount := 0
+	enrichmentCount := 0
+	firstSeen := time.Time{}
+	lastSeen := time.Time{}
+	enumerations := make([]string, 0, len(observations))
+	seenEnumerations := make(map[string]struct{}, len(observations))
+
+	for _, observation := range observations {
+		switch observation.Kind {
+		case models.ObservationKindEnrichment:
+			enrichmentCount++
+		default:
+			discoveryCount++
+		}
+
+		if !observation.DiscoveryDate.IsZero() {
+			if firstSeen.IsZero() || observation.DiscoveryDate.Before(firstSeen) {
+				firstSeen = observation.DiscoveryDate
+			}
+			if lastSeen.IsZero() || observation.DiscoveryDate.After(lastSeen) {
+				lastSeen = observation.DiscoveryDate
+			}
+		}
+
+		if observation.EnumerationID == "" {
+			continue
+		}
+		if _, exists := seenEnumerations[observation.EnumerationID]; exists {
+			continue
+		}
+		seenEnumerations[observation.EnumerationID] = struct{}{}
+		enumerations = append(enumerations, observation.EnumerationID)
+	}
+
+	sort.Strings(enumerations)
+	return []TraceSection{
+		{
+			Title: "Observation Summary",
+			Items: compactTraceValues(
+				fmt.Sprintf("Total observations: %d", len(observations)),
+				fmt.Sprintf("Discovery observations: %d", discoveryCount),
+				fmt.Sprintf("Enrichment observations: %d", enrichmentCount),
+				"Sources: "+summarizeObservationSourcesByKind(observations, ""),
+				"Enumerations: "+strings.Join(enumerations, ", "),
+				"First seen: "+FormatDateTime(firstSeen),
+				"Last seen: "+FormatDateTime(lastSeen),
+			),
+		},
+	}
+}
+
+func groupTraceContributorsBySeed(contributors []TraceContributor, seedByID map[string]models.Seed) []traceSeedGroup {
+	order := make([]string, 0, len(contributors))
+	groups := make(map[string]*traceSeedGroup, len(contributors))
+
+	for _, contributor := range contributors {
+		key := strings.TrimSpace(contributor.SeedID)
+		if key == "" {
+			key = strings.TrimSpace(contributor.SeedLabel)
+		}
+		if key == "" {
+			key = strings.TrimSpace(contributor.AssetID)
+		}
+		if key == "" {
+			key = fmt.Sprintf("unknown-%d", len(order))
+		}
+
+		group, exists := groups[key]
+		if !exists {
+			order = append(order, key)
+			group = &traceSeedGroup{
+				Key:       key,
+				SeedID:    contributor.SeedID,
+				SeedLabel: contributor.SeedLabel,
+				Seed:      seedByID[contributor.SeedID],
+			}
+			if group.SeedLabel == "" {
+				switch {
+				case group.Seed.CompanyName != "":
+					group.SeedLabel = group.Seed.CompanyName
+				case contributor.SeedID != "":
+					group.SeedLabel = contributor.SeedID
+				default:
+					group.SeedLabel = "Unknown Seed"
+				}
+			}
+			groups[key] = group
+		}
+
+		if group.SeedID == "" {
+			group.SeedID = contributor.SeedID
+		}
+		if group.Seed.ID == "" && contributor.SeedID != "" {
+			group.Seed = seedByID[contributor.SeedID]
+		}
+		if group.SeedLabel == "" && contributor.SeedLabel != "" {
+			group.SeedLabel = contributor.SeedLabel
+		}
+		group.Contributors = append(group.Contributors, contributor)
+	}
+
+	out := make([]traceSeedGroup, 0, len(order))
+	for _, key := range order {
+		out = append(out, *groups[key])
+	}
+	return out
+}
+
+func buildSeedGroupTraceDetails(seedGroups []traceSeedGroup) []TraceSection {
+	if len(seedGroups) == 0 {
+		return nil
+	}
+
+	contributorCount := 0
+	enumerations := make([]string, 0, len(seedGroups))
+	seenEnumerations := make(map[string]struct{}, len(seedGroups))
+	sources := make([]string, 0, len(seedGroups))
+	seenSources := make(map[string]struct{}, len(seedGroups))
+
+	for _, group := range seedGroups {
+		contributorCount += len(group.Contributors)
+		for _, contributor := range group.Contributors {
+			if contributor.EnumerationID != "" {
+				if _, exists := seenEnumerations[contributor.EnumerationID]; !exists {
+					seenEnumerations[contributor.EnumerationID] = struct{}{}
+					enumerations = append(enumerations, contributor.EnumerationID)
+				}
+			}
+			if contributor.Source != "" {
+				if _, exists := seenSources[contributor.Source]; !exists {
+					seenSources[contributor.Source] = struct{}{}
+					sources = append(sources, contributor.Source)
+				}
+			}
+		}
+	}
+
+	sort.Strings(enumerations)
+	sort.Strings(sources)
+	return []TraceSection{
+		{
+			Title: "Seed Summary",
+			Items: compactTraceValues(
+				fmt.Sprintf("Unique seeds: %d", len(seedGroups)),
+				fmt.Sprintf("Contributors: %d", contributorCount),
+				fmt.Sprintf("Enumerations represented: %d", len(enumerations)),
+				"Enumerations: "+strings.Join(enumerations, ", "),
+				"Sources: "+strings.Join(sources, ", "),
+			),
+		},
+	}
+}
+
+func buildSeedTraceDetails(group traceSeedGroup) []TraceSection {
+	sections := []TraceSection{
+		{
+			Title: "Seed",
+			Items: compactTraceValues(
+				"Seed ID: "+group.SeedID,
+				"Company: "+group.Seed.CompanyName,
+				"Domains: "+strings.Join(group.Seed.Domains, ", "),
+				"Tags: "+strings.Join(group.Seed.Tags, ", "),
+			),
+		},
+	}
+
+	if evidence := formatSeedEvidence(group.Seed.Evidence); len(evidence) > 0 {
+		sections = append(sections, TraceSection{
+			Title: "Evidence",
+			Items: evidence,
+		})
+	}
+
+	enumerations := uniqueTraceContributorValues(group.Contributors, func(item TraceContributor) string { return item.EnumerationID })
+	sort.Strings(enumerations)
+	sources := uniqueTraceContributorValues(group.Contributors, func(item TraceContributor) string { return item.Source })
+	sort.Strings(sources)
+	firstSeen, lastSeen := traceContributorTimeBounds(group.Contributors)
+
+	sections = appendTraceSection(sections, "Contribution Summary", compactTraceValues(
+		fmt.Sprintf("Contributors: %d", len(group.Contributors)),
+		fmt.Sprintf("Enumerations represented: %d", len(enumerations)),
+		"Enumerations: "+strings.Join(enumerations, ", "),
+		"Sources: "+strings.Join(sources, ", "),
+		"First contributed at: "+FormatDateTime(firstSeen),
+		"Last contributed at: "+FormatDateTime(lastSeen),
+	))
+
+	return sections
+}
+
+func buildContributorTraceDetails(contributor TraceContributor) []TraceSection {
+	return []TraceSection{
+		{
+			Title: "Contributor",
+			Items: compactTraceValues(
+				"Source: "+contributor.Source,
+				"Enumeration ID: "+contributor.EnumerationID,
+				"Originating asset ID: "+contributor.AssetID,
+				"Discovered at: "+FormatDateTime(contributor.DiscoveryDate),
+			),
+		},
+	}
+}
+
+func buildRelationGroupTraceDetails(assetID string, relations []models.AssetRelation) []TraceSection {
+	if len(relations) == 0 {
+		return nil
+	}
+
+	kinds := make([]string, 0, len(relations))
+	seenKinds := make(map[string]struct{}, len(relations))
+	peers := make([]string, 0, len(relations))
+	seenPeers := make(map[string]struct{}, len(relations))
+	sources := make([]string, 0, len(relations))
+	seenSources := make(map[string]struct{}, len(relations))
+
+	for _, relation := range relations {
+		if relation.Kind != "" {
+			if _, exists := seenKinds[relation.Kind]; !exists {
+				seenKinds[relation.Kind] = struct{}{}
+				kinds = append(kinds, relation.Kind)
+			}
+		}
+		peer := relation.ToIdentifier
+		if relation.ToAssetID == assetID {
+			peer = relation.FromIdentifier
+		}
+		if peer != "" {
+			if _, exists := seenPeers[peer]; !exists {
+				seenPeers[peer] = struct{}{}
+				peers = append(peers, peer)
+			}
+		}
+		if relation.Source != "" {
+			if _, exists := seenSources[relation.Source]; !exists {
+				seenSources[relation.Source] = struct{}{}
+				sources = append(sources, relation.Source)
+			}
+		}
+	}
+
+	sort.Strings(kinds)
+	sort.Strings(peers)
+	sort.Strings(sources)
+	return []TraceSection{
+		{
+			Title: "Relation Summary",
+			Items: compactTraceValues(
+				fmt.Sprintf("Total relations: %d", len(relations)),
+				fmt.Sprintf("Peer assets: %d", len(peers)),
+				"Peers: "+strings.Join(peers, ", "),
+				"Kinds: "+strings.Join(kinds, ", "),
+				"Sources: "+strings.Join(sources, ", "),
+			),
+		},
+	}
+}
+
+func buildEnrichmentGroupTraceDetails(asset models.Asset) []TraceSection {
+	stateKeys := make([]string, 0, len(asset.EnrichmentStates))
+	statusCounts := make(map[string]int, len(asset.EnrichmentStates))
+	lastUpdated := time.Time{}
+
+	for key, state := range asset.EnrichmentStates {
+		stateKeys = append(stateKeys, key)
+		status := strings.TrimSpace(strings.ToLower(state.Status))
+		if status != "" {
+			statusCounts[status]++
+		}
+		if !state.UpdatedAt.IsZero() && (lastUpdated.IsZero() || state.UpdatedAt.After(lastUpdated)) {
+			lastUpdated = state.UpdatedAt
+		}
+	}
+
+	sort.Strings(stateKeys)
+	statuses := make([]string, 0, len(statusCounts))
+	for status, count := range statusCounts {
+		statuses = append(statuses, fmt.Sprintf("%s (%d)", status, count))
+	}
+	sort.Strings(statuses)
+
+	dataKeys := make([]string, 0, len(asset.EnrichmentData))
+	for key := range asset.EnrichmentData {
+		dataKeys = append(dataKeys, key)
+	}
+	sort.Strings(dataKeys)
+
+	return []TraceSection{
+		{
+			Title: "Enrichment Summary",
+			Items: compactTraceValues(
+				fmt.Sprintf("Stages: %d", len(stateKeys)),
+				"Stage names: "+strings.Join(stateKeys, ", "),
+				"Statuses: "+strings.Join(statuses, ", "),
+				"Exported fields: "+strings.Join(dataKeys, ", "),
+				"Latest update: "+FormatDateTime(lastUpdated),
+			),
+		},
+	}
+}
+
+func traceContributorTimeBounds(contributors []TraceContributor) (time.Time, time.Time) {
+	firstSeen := time.Time{}
+	lastSeen := time.Time{}
+	for _, contributor := range contributors {
+		if contributor.DiscoveryDate.IsZero() {
+			continue
+		}
+		if firstSeen.IsZero() || contributor.DiscoveryDate.Before(firstSeen) {
+			firstSeen = contributor.DiscoveryDate
+		}
+		if lastSeen.IsZero() || contributor.DiscoveryDate.After(lastSeen) {
+			lastSeen = contributor.DiscoveryDate
+		}
+	}
+	return firstSeen, lastSeen
+}
+
 func buildObservationTraceDetails(observation models.AssetObservation, enumByID map[string]models.Enumeration, seedByID map[string]models.Seed) []TraceSection {
 	sections := []TraceSection{
 		{
@@ -653,10 +1006,20 @@ func buildObservationTraceDetails(observation models.AssetObservation, enumByID 
 			Items: compactTraceValues(
 				"Enumeration ID: "+enum.ID,
 				"Status: "+enum.Status,
+				"Created at: "+FormatDateTime(enum.CreatedAt),
+				"Started at: "+FormatDateTime(enum.StartedAt),
+				"Ended at: "+FormatDateTime(enum.EndedAt),
 				"Seed ID: "+enum.SeedID,
-				"Seed domains: "+strings.Join(seed.Domains, ", "),
 			),
 		})
+		seedItems := compactTraceValues(
+			"Seed ID: "+seed.ID,
+			"Company: "+seed.CompanyName,
+			"Seed domains: "+strings.Join(seed.Domains, ", "),
+			"Seed tags: "+strings.Join(seed.Tags, ", "),
+		)
+		seedItems = append(seedItems, formatSeedEvidence(seed.Evidence)...)
+		sections = appendTraceSection(sections, "Seed Context", seedItems)
 	}
 
 	if observation.DomainDetails != nil {
