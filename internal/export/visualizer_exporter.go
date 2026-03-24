@@ -1099,8 +1099,8 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     .domain-child-trigger:focus-visible {
       color: var(--accent);
       background: rgba(190, 106, 21, 0.08);
-      text-decoration: underline;
-      text-underline-offset: 0.16em;
+      box-shadow: inset 0 0 0 1px rgba(190, 106, 21, 0.18);
+      transform: translateY(-1px);
       outline: none;
     }
 
