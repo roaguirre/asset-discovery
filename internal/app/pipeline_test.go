@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"asset-discovery/internal/collect"
 	"asset-discovery/internal/tracing/telemetry"
 )
 
@@ -84,5 +85,39 @@ func TestNewPipeline_AssemblesRuntimeAndStages(t *testing.T) {
 	}
 	if pipeline.engine.RunID != "run-123" {
 		t.Fatalf("expected engine run ID to be set, got %q", pipeline.engine.RunID)
+	}
+
+	dnsCollector, ok := pipeline.engine.Collectors[0].(*collect.DNSCollector)
+	if !ok {
+		t.Fatalf("expected first collector to be DNSCollector, got %T", pipeline.engine.Collectors[0])
+	}
+	if got := dnsCollector.VariantSweepConfig(); got.Mode != collect.DNSVariantSweepModeExhaustive {
+		t.Fatalf("expected default DNS variant sweep mode to be exhaustive, got %+v", got)
+	}
+}
+
+func TestNewPipeline_AppliesDNSVariantSweepOverrides(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		DNSVariantSweep: collect.DNSVariantSweepConfig{
+			Mode:           collect.DNSVariantSweepModePrioritized,
+			BatchSize:      64,
+			Concurrency:    12,
+			PrioritizedCap: 512,
+		},
+	})
+
+	dnsCollector, ok := pipeline.engine.Collectors[0].(*collect.DNSCollector)
+	if !ok {
+		t.Fatalf("expected first collector to be DNSCollector, got %T", pipeline.engine.Collectors[0])
+	}
+
+	want := collect.DNSVariantSweepConfig{
+		Mode:           collect.DNSVariantSweepModePrioritized,
+		BatchSize:      64,
+		Concurrency:    12,
+		PrioritizedCap: 512,
+	}
+	if got := dnsCollector.VariantSweepConfig(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected DNS variant sweep config %+v, got %+v", want, got)
 	}
 }

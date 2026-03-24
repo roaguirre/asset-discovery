@@ -9,10 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"asset-discovery/internal/export/visualizer"
 	"asset-discovery/internal/filter"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/tracing/lineage"
 )
+
+func buildVisualizerRun(runID string, createdAt time.Time, downloads Downloads, pCtx *models.PipelineContext) Run {
+	return visualizer.BuildRun(runID, createdAt, downloads, pCtx)
+}
 
 func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 	htmlPath := filepath.Join(t.TempDir(), "visualizer.html")
@@ -183,10 +188,13 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		"domain-child-trigger",
 		"domain-child-row",
 		"domain-child-identifier",
-		"group.summaryRow = registrable || group.rows[0] || null;",
+		"const summaryByKey = new Map();",
+		"const allDomainRows = run ? rowsForSourceFilter(run.rows) : [];",
 		"const summaryExpanded = Boolean(summaryRow) && state.expandedRows.has(summaryRow.asset_id);",
-		"const summaryRow = group.summaryRow || group.rows[0] || null;",
+		"const summaryRow = summaryByKey.get(group.key) || null;",
+		"const displayRow = summaryRow || group.rows[0] || null;",
 		"const childRows = group.rows.filter((row) => !summaryRow || row.asset_id !== summaryRow.asset_id);",
+		"const summaryIdentifier = escapeHTML(group.key);",
 		"Showing \" + domainGroups.length + \" registrable domains",
 		"function rowsForSourceFilter(runRows)",
 		`if (state.view === "domains") { return runRows.filter((row) => row.asset_type === "domain"); }`,

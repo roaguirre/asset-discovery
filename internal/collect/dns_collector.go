@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,8 +23,8 @@ import (
 const (
 	defaultDNSLookupTimeout         = 2 * time.Second
 	defaultDNSRDAPTimeout           = 10 * time.Second
+	defaultVariantProbeBatchSize    = 256
 	defaultMaxVariantProbesPerRoot  = 256
-	defaultMaxLiveVariantCandidates = 25
 	defaultVariantProbeConcurrency  = 32
 	dnsAssetSourcePivot             = "dns_dns_pivot"
 	dnsAssetSourceVariant           = "dns_variant_sweep"
@@ -39,6 +40,29 @@ const (
 )
 
 var defaultGenericVariantSuffixes = []string{"com", "net", "org", "io", "co", "app", "dev", "ai", "cloud", "tech"}
+
+type DNSVariantSweepMode string
+
+const (
+	DNSVariantSweepModeExhaustive  DNSVariantSweepMode = "exhaustive"
+	DNSVariantSweepModePrioritized DNSVariantSweepMode = "prioritized"
+)
+
+type DNSVariantSweepConfig struct {
+	Mode           DNSVariantSweepMode
+	BatchSize      int
+	Concurrency    int
+	PrioritizedCap int
+}
+
+func DefaultDNSVariantSweepConfig() DNSVariantSweepConfig {
+	return DNSVariantSweepConfig{
+		Mode:           DNSVariantSweepModeExhaustive,
+		BatchSize:      defaultVariantProbeBatchSize,
+		Concurrency:    defaultVariantProbeConcurrency,
+		PrioritizedCap: defaultMaxVariantProbesPerRoot,
+	}
+}
 
 type dnsLookupIPFunc func(ctx context.Context, host string) ([]net.IP, error)
 type dnsLookupMXFunc func(ctx context.Context, host string) ([]*net.MX, error)
@@ -102,6 +126,13 @@ type observedDNSCandidate struct {
 	index       int
 }
 
+type dnsVariantSweepMetrics struct {
+	totalRoots        int
+	batches           int
+	preflightNXDOMAIN int
+	fullObservations  int
+}
+
 type dnsLookupIssueAggregator struct {
 	counts  map[string]int
 	samples map[string]error
@@ -110,21 +141,22 @@ type dnsLookupIssueAggregator struct {
 // DNSCollector resolves seed domains, extracts more DNS-derived assets, and
 // judge-gates cross-root DNS pivots into later collection waves.
 type DNSCollector struct {
-	judge                    ownership.Judge
-	rdapClient               *http.Client
-	lookupIPs                dnsLookupIPFunc
-	lookupMX                 dnsLookupMXFunc
-	lookupTXT                dnsLookupTXTFunc
-	lookupNS                 dnsLookupNSFunc
-	lookupCNAME              dnsLookupCNAMEFunc
-	lookupRDAP               dnsLookupRDAPFunc
-	lookupTimeout            time.Duration
-	rdapTimeout              time.Duration
-	maxVariantProbesPerRoot  int
-	maxLiveVariantCandidates int
-	variantProbeConcurrency  int
-	variantSuffixes          []string
-	genericVariantSuffixes   []string
+	judge                   ownership.Judge
+	rdapClient              *http.Client
+	lookupIPs               dnsLookupIPFunc
+	lookupMX                dnsLookupMXFunc
+	lookupTXT               dnsLookupTXTFunc
+	lookupNS                dnsLookupNSFunc
+	lookupCNAME             dnsLookupCNAMEFunc
+	lookupRDAP              dnsLookupRDAPFunc
+	lookupTimeout           time.Duration
+	rdapTimeout             time.Duration
+	variantSweepMode        DNSVariantSweepMode
+	variantProbeBatchSize   int
+	maxVariantProbesPerRoot int
+	variantProbeConcurrency int
+	variantSuffixes         []string
+	genericVariantSuffixes  []string
 }
 
 type DNSCollectorOption func(*DNSCollector)
@@ -139,6 +171,27 @@ func WithDNSCollectorRDAPClient(client *http.Client) DNSCollectorOption {
 	return func(c *DNSCollector) {
 		if client != nil {
 			c.rdapClient = client
+		}
+	}
+}
+
+func WithDNSCollectorVariantSweepConfig(cfg DNSVariantSweepConfig) DNSCollectorOption {
+	return func(c *DNSCollector) {
+		if c == nil {
+			return
+		}
+
+		if mode := normalizeDNSVariantSweepMode(cfg.Mode); mode != "" {
+			c.variantSweepMode = mode
+		}
+		if cfg.BatchSize > 0 {
+			c.variantProbeBatchSize = cfg.BatchSize
+		}
+		if cfg.Concurrency > 0 {
+			c.variantProbeConcurrency = cfg.Concurrency
+		}
+		if cfg.PrioritizedCap > 0 {
+			c.maxVariantProbesPerRoot = cfg.PrioritizedCap
 		}
 	}
 }
@@ -162,13 +215,14 @@ func NewDNSCollector(options ...DNSCollectorOption) *DNSCollector {
 		lookupCNAME: func(ctx context.Context, host string) (string, error) {
 			return net.DefaultResolver.LookupCNAME(ctx, host)
 		},
-		lookupTimeout:            defaultDNSLookupTimeout,
-		rdapTimeout:              defaultDNSRDAPTimeout,
-		maxVariantProbesPerRoot:  defaultMaxVariantProbesPerRoot,
-		maxLiveVariantCandidates: defaultMaxLiveVariantCandidates,
-		variantProbeConcurrency:  defaultVariantProbeConcurrency,
-		variantSuffixes:          discovery.ICANNPublicSuffixes(),
-		genericVariantSuffixes:   append([]string(nil), defaultGenericVariantSuffixes...),
+		lookupTimeout:           defaultDNSLookupTimeout,
+		rdapTimeout:             defaultDNSRDAPTimeout,
+		variantSweepMode:        DNSVariantSweepModeExhaustive,
+		variantProbeBatchSize:   defaultVariantProbeBatchSize,
+		maxVariantProbesPerRoot: defaultMaxVariantProbesPerRoot,
+		variantProbeConcurrency: defaultVariantProbeConcurrency,
+		variantSuffixes:         discovery.ICANNPublicSuffixes(),
+		genericVariantSuffixes:  append([]string(nil), defaultGenericVariantSuffixes...),
 	}
 
 	for _, option := range options {
@@ -182,6 +236,24 @@ func NewDNSCollector(options ...DNSCollectorOption) *DNSCollector {
 	}
 
 	return collector
+}
+
+func (c *DNSCollector) VariantSweepConfig() DNSVariantSweepConfig {
+	if c == nil {
+		return DefaultDNSVariantSweepConfig()
+	}
+
+	mode := normalizeDNSVariantSweepMode(c.variantSweepMode)
+	if mode == "" {
+		mode = DNSVariantSweepModeExhaustive
+	}
+
+	return DNSVariantSweepConfig{
+		Mode:           mode,
+		BatchSize:      maxInt(1, c.variantProbeBatchSize),
+		Concurrency:    maxInt(1, c.variantProbeConcurrency),
+		PrioritizedCap: maxInt(0, c.maxVariantProbesPerRoot),
+	}
 }
 
 func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
@@ -203,6 +275,9 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 		newEnums = append(newEnums, enum)
 
 		metricsProbed := 0
+		metricsVariantBatches := 0
+		metricsPreflightNXDOMAIN := 0
+		metricsFullVariantObservations := 0
 		metricsLiveVariants := 0
 		metricsJudgeSubmitted := 0
 		metricsPromoted := 0
@@ -318,7 +393,7 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 		}
 
 		exactRoots := sortedDNSPivotRoots(candidateByRoot)
-		observedRoots, observedErrors := c.observeCandidateRoots(ctx, exactRoots, len(exactRoots), "record pivot")
+		observedRoots, observedErrors := c.observeCandidateRoots(ctx, exactRoots, "record pivot")
 		newErrors = append(newErrors, observedErrors...)
 		for _, observed := range observedRoots {
 			pivotCandidate := ensureDNSPivotCandidate(candidateByRoot, observed.root)
@@ -334,9 +409,22 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 				continue
 			}
 
-			liveVariants, variantErrors := c.observeCandidateRoots(ctx, probeRoots, c.maxLiveVariantCandidates, "variant sweep")
+			liveVariants, variantErrors, variantMetrics := c.observeVariantCandidateRoots(ctx, probeRoots)
 			newErrors = append(newErrors, variantErrors...)
+			metricsVariantBatches += variantMetrics.batches
+			metricsPreflightNXDOMAIN += variantMetrics.preflightNXDOMAIN
+			metricsFullVariantObservations += variantMetrics.fullObservations
 			metricsLiveVariants += len(liveVariants)
+			telemetry.Infof(
+				ctx,
+				"[DNS Collector] Variant sweep label=%s total_suffixes=%d batches=%d preflight_nxdomain_skips=%d full_observations=%d live_variants=%d",
+				labelGroup.label,
+				variantMetrics.totalRoots,
+				variantMetrics.batches,
+				variantMetrics.preflightNXDOMAIN,
+				variantMetrics.fullObservations,
+				len(liveVariants),
+			)
 
 			for _, observed := range liveVariants {
 				pivotCandidate := ensureDNSPivotCandidate(candidateByRoot, observed.root)
@@ -428,9 +516,12 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 		}
 
 		telemetry.Infof(ctx,
-			"[DNS Collector] Seed %s summary: variant probes=%d live_variants=%d judge_submissions=%d promotions=%d",
+			"[DNS Collector] Seed %s summary: variant_probes=%d variant_batches=%d preflight_nxdomain_skips=%d full_observations=%d live_variants=%d judge_submissions=%d promotions=%d",
 			discovery.FirstNonEmpty(seed.CompanyName, seed.ID),
 			metricsProbed,
+			metricsVariantBatches,
+			metricsPreflightNXDOMAIN,
+			metricsFullVariantObservations,
 			metricsLiveVariants,
 			metricsJudgeSubmitted,
 			metricsPromoted,
@@ -479,7 +570,7 @@ func groupSeedRootsByLabel(seedRoots map[string]struct{}) []dnsLabelGroup {
 }
 
 func (c *DNSCollector) buildVariantProbeRoots(seed models.Seed, knownRoots []string, seedRoots map[string]struct{}, candidateByRoot map[string]*dnsPivotCandidate) []string {
-	if c.maxVariantProbesPerRoot <= 0 {
+	if c.variantSweepMode == DNSVariantSweepModePrioritized && c.maxVariantProbesPerRoot <= 0 {
 		return nil
 	}
 
@@ -495,7 +586,7 @@ func (c *DNSCollector) buildVariantProbeRoots(seed models.Seed, knownRoots []str
 	}
 
 	prioritizedSuffixes := c.prioritizedVariantSuffixes(seed, knownRoots)
-	probeRoots := make([]string, 0, minInt(c.maxVariantProbesPerRoot, len(prioritizedSuffixes)))
+	probeRoots := make([]string, 0, len(prioritizedSuffixes))
 	seen := make(map[string]struct{})
 
 	for _, suffix := range prioritizedSuffixes {
@@ -522,7 +613,7 @@ func (c *DNSCollector) buildVariantProbeRoots(seed models.Seed, knownRoots []str
 		}
 
 		probeRoots = append(probeRoots, candidateRoot)
-		if len(probeRoots) >= c.maxVariantProbesPerRoot {
+		if c.variantSweepMode == DNSVariantSweepModePrioritized && len(probeRoots) >= c.maxVariantProbesPerRoot {
 			break
 		}
 	}
@@ -601,6 +692,10 @@ func publicSuffix(domain string) string {
 }
 
 func (c *DNSCollector) observeDomain(ctx context.Context, domain string) (dnsObservation, []dnsLookupIssue) {
+	return c.observeDomainWithNS(ctx, domain, nil, false)
+}
+
+func (c *DNSCollector) observeDomainWithNS(ctx context.Context, domain string, preloadedNS []*net.NS, hasPreloadedNS bool) (dnsObservation, []dnsLookupIssue) {
 	domain = discovery.NormalizeDomainIdentifier(domain)
 	observation := dnsObservation{
 		domain: domain,
@@ -674,13 +769,17 @@ func (c *DNSCollector) observeDomain(ctx context.Context, domain string) (dnsObs
 		})
 	}
 
-	nss, err := c.lookupNSWithTimeout(ctx, domain)
-	if err != nil {
-		lookupIssues = append(lookupIssues, dnsLookupIssue{
-			recordKind: "NS",
-			domain:     domain,
-			err:        err,
-		})
+	nss := preloadedNS
+	if !hasPreloadedNS {
+		var err error
+		nss, err = c.lookupNSWithTimeout(ctx, domain)
+		if err != nil {
+			lookupIssues = append(lookupIssues, dnsLookupIssue{
+				recordKind: "NS",
+				domain:     domain,
+				err:        err,
+			})
+		}
 	}
 	for _, ns := range nss {
 		host := discovery.NormalizeDomainIdentifier(ns.Host)
@@ -777,11 +876,8 @@ func rootsFromDomains(domains []string) []string {
 	return discovery.UniqueLowerStrings(roots)
 }
 
-func (c *DNSCollector) observeCandidateRoots(ctx context.Context, roots []string, liveCap int, probeKind string) ([]observedDNSCandidate, []error) {
+func (c *DNSCollector) observeCandidateRoots(ctx context.Context, roots []string, probeKind string) ([]observedDNSCandidate, []error) {
 	if len(roots) == 0 {
-		return nil, nil
-	}
-	if liveCap <= 0 {
 		return nil, nil
 	}
 
@@ -838,12 +934,137 @@ func (c *DNSCollector) observeCandidateRoots(ctx context.Context, roots []string
 	sort.SliceStable(live, func(i, j int) bool {
 		return live[i].index < live[j].index
 	})
-	if len(live) > liveCap {
-		live = append([]observedDNSCandidate(nil), live[:liveCap]...)
-	}
 	lookupAggregator.log(ctx, probeKind)
 
 	return live, errs
+}
+
+func (c *DNSCollector) observeVariantCandidateRoots(ctx context.Context, roots []string) ([]observedDNSCandidate, []error, dnsVariantSweepMetrics) {
+	metrics := dnsVariantSweepMetrics{totalRoots: len(roots)}
+	if len(roots) == 0 {
+		return nil, nil, metrics
+	}
+
+	batchSize := maxInt(1, c.variantProbeBatchSize)
+	live := make([]observedDNSCandidate, 0)
+	errs := make([]error, 0)
+	lookupAggregator := dnsLookupIssueAggregator{
+		counts:  make(map[string]int),
+		samples: make(map[string]error),
+	}
+
+	for start := 0; start < len(roots); start += batchSize {
+		end := minInt(start+batchSize, len(roots))
+		batchLive, batchErrors, batchLookupIssues, batchMetrics := c.observeVariantCandidateRootBatch(ctx, roots[start:end], start)
+		metrics.batches++
+		metrics.preflightNXDOMAIN += batchMetrics.preflightNXDOMAIN
+		metrics.fullObservations += batchMetrics.fullObservations
+		live = append(live, batchLive...)
+		errs = append(errs, batchErrors...)
+		lookupAggregator.merge(batchLookupIssues)
+	}
+
+	sort.SliceStable(live, func(i, j int) bool {
+		return live[i].index < live[j].index
+	})
+	lookupAggregator.log(ctx, "variant sweep")
+	if metrics.preflightNXDOMAIN > 0 {
+		telemetry.Infof(
+			ctx,
+			"[DNS Collector] NS preflight NXDOMAIN skips for variant sweep probes: count=%d",
+			metrics.preflightNXDOMAIN,
+		)
+	}
+
+	return live, errs, metrics
+}
+
+func (c *DNSCollector) observeVariantCandidateRootBatch(ctx context.Context, roots []string, indexOffset int) ([]observedDNSCandidate, []error, dnsLookupIssueAggregator, dnsVariantSweepMetrics) {
+	lookupAggregator := dnsLookupIssueAggregator{
+		counts:  make(map[string]int),
+		samples: make(map[string]error),
+	}
+	metrics := dnsVariantSweepMetrics{}
+	if len(roots) == 0 {
+		return nil, nil, lookupAggregator, metrics
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxInt(1, c.variantProbeConcurrency))
+
+	var mu sync.Mutex
+	live := make([]observedDNSCandidate, 0)
+	errs := make([]error, 0)
+
+	for idx, root := range roots {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(index int, candidateRoot string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			observation, lookupIssues, preflightNXDOMAIN, fullObserved := c.observeVariantRoot(ctx, candidateRoot)
+
+			mu.Lock()
+			if preflightNXDOMAIN {
+				metrics.preflightNXDOMAIN++
+			}
+			if fullObserved {
+				metrics.fullObservations++
+			}
+			for _, issue := range lookupIssues {
+				lookupAggregator.add(issue)
+			}
+			mu.Unlock()
+
+			if preflightNXDOMAIN || !observation.live {
+				return
+			}
+
+			rdapData, err := c.lookupRDAPWithTimeout(ctx, candidateRoot)
+			if err != nil && err != registration.ErrUnsupportedRegistrationData {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+
+			mu.Lock()
+			live = append(live, observedDNSCandidate{
+				root:        candidateRoot,
+				observation: observation,
+				rdap:        rdapData,
+				index:       indexOffset + index,
+			})
+			mu.Unlock()
+		}(idx, root)
+	}
+
+	wg.Wait()
+	return live, errs, lookupAggregator, metrics
+}
+
+func (c *DNSCollector) observeVariantRoot(ctx context.Context, domain string) (dnsObservation, []dnsLookupIssue, bool, bool) {
+	domain = discovery.NormalizeDomainIdentifier(domain)
+	observation := dnsObservation{
+		domain: domain,
+		root:   discovery.RegistrableDomain(domain),
+	}
+	if domain == "" {
+		return observation, nil, false, false
+	}
+
+	nss, err := c.lookupNSWithTimeout(ctx, domain)
+	if err != nil {
+		if isNXDomainDNSError(err) {
+			return observation, nil, true, false
+		}
+		fullObservation, lookupIssues := c.observeDomain(ctx, domain)
+		return fullObservation, lookupIssues, false, true
+	}
+
+	fullObservation, lookupIssues := c.observeDomainWithNS(ctx, domain, nss, true)
+	return fullObservation, lookupIssues, false, true
 }
 
 func (c *DNSCollector) lookupIPsWithTimeout(ctx context.Context, domain string) ([]string, error) {
@@ -1223,6 +1444,22 @@ func maxInt(left, right int) int {
 	return right
 }
 
+func normalizeDNSVariantSweepMode(mode DNSVariantSweepMode) DNSVariantSweepMode {
+	switch DNSVariantSweepMode(strings.ToLower(strings.TrimSpace(string(mode)))) {
+	case DNSVariantSweepModePrioritized:
+		return DNSVariantSweepModePrioritized
+	case DNSVariantSweepModeExhaustive:
+		return DNSVariantSweepModeExhaustive
+	default:
+		return ""
+	}
+}
+
+func isNXDomainDNSError(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
+}
+
 func (i dnsLookupIssue) asError() error {
 	return fmt.Errorf("lookup %s %s: %w", i.recordKind, i.domain, i.err)
 }
@@ -1239,6 +1476,19 @@ func (a *dnsLookupIssueAggregator) add(issue dnsLookupIssue) {
 	a.counts[key]++
 	if _, exists := a.samples[key]; !exists {
 		a.samples[key] = issue.asError()
+	}
+}
+
+func (a *dnsLookupIssueAggregator) merge(other dnsLookupIssueAggregator) {
+	if a == nil {
+		return
+	}
+
+	for key, count := range other.counts {
+		a.counts[key] += count
+		if _, exists := a.samples[key]; !exists {
+			a.samples[key] = other.samples[key]
+		}
 	}
 }
 

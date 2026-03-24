@@ -24,11 +24,12 @@ import (
 const DefaultVisualizerOutput = "exports/visualizer.html"
 
 type Config struct {
-	Outputs        []string
-	OutputsChanged bool
-	RunID          string
-	Now            func() time.Time
-	Telemetry      telemetry.Provider
+	Outputs         []string
+	OutputsChanged  bool
+	RunID           string
+	Now             func() time.Time
+	Telemetry       telemetry.Provider
+	DNSVariantSweep collect.DNSVariantSweepConfig
 }
 
 type Pipeline struct {
@@ -73,6 +74,7 @@ func NewPipeline(cfg Config) *Pipeline {
 			collect.NewDNSCollector(
 				collect.WithDNSCollectorJudge(ownershipJudge),
 				collect.WithDNSCollectorRDAPClient(dnsRDAPClient),
+				collect.WithDNSCollectorVariantSweepConfig(cfg.DNSVariantSweep),
 			),
 			collect.NewCrtShCollector(collect.WithCrtShClient(archiveClient)),
 			collect.NewRDAPCollector(collect.WithRDAPClient(standardClient)),

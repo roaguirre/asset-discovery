@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 
 	"asset-discovery/internal/models"
@@ -30,6 +31,7 @@ func TestDNSCollector_ExactDomainRecordsAndSameRootHosts(t *testing.T) {
 	collector.lookupCNAME = resolver.lookupCNAME
 	collector.lookupRDAP = resolver.lookupRDAP
 	collector.judge = nil
+	collector.variantSweepMode = DNSVariantSweepModePrioritized
 	collector.maxVariantProbesPerRoot = 0
 
 	pCtx := &models.PipelineContext{
@@ -65,7 +67,46 @@ func TestDNSCollector_ExactDomainRecordsAndSameRootHosts(t *testing.T) {
 	}
 }
 
-func TestDNSCollector_RespectsVariantProbeAndLiveCaps(t *testing.T) {
+func TestDNSCollector_ExhaustiveVariantSweepProcessesAllBatches(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+	resolver.ips["example.com"] = []string{"203.0.113.10"}
+	resolver.ns["example.com"] = []string{"ns1.example.com"}
+
+	for _, root := range []string{"example.net", "example.org", "example.dev", "example.app"} {
+		resolver.ips[root] = []string{"203.0.113.10"}
+		resolver.ns[root] = []string{"ns1.example.com"}
+	}
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.judge = nil
+	collector.variantSuffixes = []string{"com", "net", "org", "dev", "app"}
+	collector.variantProbeBatchSize = 2
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	for _, root := range []string{"example.net", "example.org", "example.dev", "example.app"} {
+		if resolver.lookupCount(root) == 0 {
+			t.Fatalf("expected exhaustive sweep to probe %s across batches, got %d lookups", root, resolver.lookupCount(root))
+		}
+	}
+}
+
+func TestDNSCollector_PrioritizedVariantSweepHonorsCapAndOrdering(t *testing.T) {
 	collector := NewDNSCollector()
 	resolver := newDNSCollectorTestResolver()
 	resolver.ips["example.com"] = []string{"203.0.113.10"}
@@ -84,18 +125,10 @@ func TestDNSCollector_RespectsVariantProbeAndLiveCaps(t *testing.T) {
 	collector.lookupTXT = resolver.lookupTXT
 	collector.lookupCNAME = resolver.lookupCNAME
 	collector.lookupRDAP = resolver.lookupRDAP
+	collector.variantSweepMode = DNSVariantSweepModePrioritized
 	collector.variantSuffixes = []string{"com", "net", "org", "dev"}
 	collector.maxVariantProbesPerRoot = 2
-	collector.maxLiveVariantCandidates = 1
-	collector.judge = &stubOwnershipJudge{
-		decisions: []ownership.Decision{
-			{
-				Root:       "example.net",
-				Kind:       "ownership_judged",
-				Confidence: 0.94,
-			},
-		},
-	}
+	collector.judge = &stubOwnershipJudge{}
 
 	pCtx := &models.PipelineContext{
 		Seeds: []models.Seed{
@@ -116,14 +149,11 @@ func TestDNSCollector_RespectsVariantProbeAndLiveCaps(t *testing.T) {
 	if judge == nil || len(judge.seen) != 1 {
 		t.Fatalf("expected one ownership-judge call, got %+v", judge)
 	}
-	if len(judge.seen[0].Candidates) != 1 || judge.seen[0].Candidates[0].Root != "example.net" {
-		t.Fatalf("expected only the first live variant to reach the judge, got %+v", judge.seen[0].Candidates)
+	if len(judge.seen[0].Candidates) != 2 {
+		t.Fatalf("expected prioritized sweep to keep only two live variants, got %+v", judge.seen[0].Candidates)
 	}
-	if !seedExists(pCtx.Seeds, "example.net") {
-		t.Fatalf("expected judge-approved variant root to be promoted, got %+v", pCtx.Seeds)
-	}
-	if !assetWithSourceExists(pCtx.Assets, "example.net", dnsAssetSourceVariant) {
-		t.Fatalf("expected approved variant asset with %s source, got %+v", dnsAssetSourceVariant, pCtx.Assets)
+	if judge.seen[0].Candidates[0].Root != "example.net" || judge.seen[0].Candidates[1].Root != "example.org" {
+		t.Fatalf("expected prioritized sweep ordering to be preserved, got %+v", judge.seen[0].Candidates)
 	}
 }
 
@@ -145,6 +175,7 @@ func TestDNSCollector_PromotesJudgeApprovedExactDNSPivot(t *testing.T) {
 	collector.lookupTXT = resolver.lookupTXT
 	collector.lookupCNAME = resolver.lookupCNAME
 	collector.lookupRDAP = resolver.lookupRDAP
+	collector.variantSweepMode = DNSVariantSweepModePrioritized
 	collector.maxVariantProbesPerRoot = 0
 	collector.judge = &stubOwnershipJudge{
 		decisions: []ownership.Decision{
@@ -192,6 +223,7 @@ func TestDNSCollector_DoesNotJudgeRecordReferenceWithoutOverlap(t *testing.T) {
 	collector.lookupTXT = resolver.lookupTXT
 	collector.lookupCNAME = resolver.lookupCNAME
 	collector.lookupRDAP = resolver.lookupRDAP
+	collector.variantSweepMode = DNSVariantSweepModePrioritized
 	collector.maxVariantProbesPerRoot = 0
 	collector.judge = &stubOwnershipJudge{}
 
@@ -235,6 +267,7 @@ func TestDNSCollector_DoesNotTreatCollapsedOrganizationNamesAsCorroboration(t *t
 	collector.lookupTXT = resolver.lookupTXT
 	collector.lookupCNAME = resolver.lookupCNAME
 	collector.lookupRDAP = resolver.lookupRDAP
+	collector.variantSweepMode = DNSVariantSweepModePrioritized
 	collector.maxVariantProbesPerRoot = 0
 	collector.judge = &stubOwnershipJudge{}
 
@@ -269,6 +302,7 @@ func TestDNSCollector_RecordsExactLookupErrors(t *testing.T) {
 	collector.lookupCNAME = resolver.lookupCNAME
 	collector.lookupRDAP = resolver.lookupRDAP
 	collector.judge = nil
+	collector.variantSweepMode = DNSVariantSweepModePrioritized
 	collector.maxVariantProbesPerRoot = 0
 
 	pCtx := &models.PipelineContext{
@@ -287,14 +321,153 @@ func TestDNSCollector_RecordsExactLookupErrors(t *testing.T) {
 	}
 }
 
+func TestDNSCollector_VariantPreflightNXDOMAINSkipsOtherLookups(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+	resolver.ips["example.com"] = []string{"203.0.113.10"}
+	resolver.ns["example.com"] = []string{"ns1.example.com"}
+	resolver.setLookupError("NS", "example.net", &net.DNSError{
+		Err:        "no such host",
+		Name:       "example.net",
+		Server:     "resolver",
+		IsNotFound: true,
+	})
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.judge = nil
+	collector.variantSuffixes = []string{"com", "net"}
+	collector.variantProbeBatchSize = 1
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to complete with NXDOMAIN preflight skips, got %v", err)
+	}
+
+	if resolver.lookupCountByKind("NS", "example.net") != 1 {
+		t.Fatalf("expected one NS preflight lookup for example.net, got %d", resolver.lookupCountByKind("NS", "example.net"))
+	}
+	for _, kind := range []string{"A/AAAA", "MX", "TXT", "CNAME"} {
+		if resolver.lookupCountByKind(kind, "example.net") != 0 {
+			t.Fatalf("expected %s lookup to be skipped after NXDOMAIN preflight, got %d", kind, resolver.lookupCountByKind(kind, "example.net"))
+		}
+	}
+}
+
+func TestDNSCollector_VariantPreflightTransientNSErrorFallsBackToFullObservation(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+	resolver.ips["example.com"] = []string{"203.0.113.10"}
+	resolver.ns["example.com"] = []string{"ns1.example.com"}
+
+	resolver.ips["example.net"] = []string{"203.0.113.10"}
+	resolver.setLookupError("NS", "example.net", &net.DNSError{
+		Err:         "temporary failure",
+		Name:        "example.net",
+		Server:      "resolver",
+		IsTemporary: true,
+	})
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.judge = nil
+	collector.variantSuffixes = []string{"com", "net"}
+	collector.variantProbeBatchSize = 1
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to complete after transient NS fallback, got %v", err)
+	}
+
+	for _, kind := range []string{"A/AAAA", "MX", "TXT", "CNAME"} {
+		if resolver.lookupCountByKind(kind, "example.net") == 0 {
+			t.Fatalf("expected %s lookup to run after transient NS preflight failure", kind)
+		}
+	}
+	if resolver.lookupCountByKind("NS", "example.net") < 2 {
+		t.Fatalf("expected transient NS preflight to fall back to the full observation path, got %d NS lookups", resolver.lookupCountByKind("NS", "example.net"))
+	}
+}
+
+func TestDNSCollector_ExhaustiveVariantSweepDoesNotTruncateLiveCandidates(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+	resolver.ips["example.com"] = []string{"203.0.113.10"}
+	resolver.ns["example.com"] = []string{"ns1.example.com"}
+
+	variantSuffixes := []string{
+		"com", "net", "org", "dev", "app", "ai", "io", "cloud", "tech", "ac",
+		"ad", "ae", "aero", "af", "ag", "am", "as", "at", "au", "be",
+		"biz", "br", "ca", "cc", "ch", "cl", "cn", "co", "de", "es",
+		"eu", "fi", "fr",
+	}
+	for _, suffix := range variantSuffixes[1:] {
+		root := "example." + suffix
+		resolver.ips[root] = []string{"203.0.113.10"}
+		resolver.ns[root] = []string{"ns1.example.com"}
+	}
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.variantSuffixes = variantSuffixes
+	collector.variantProbeBatchSize = 8
+	collector.judge = &stubOwnershipJudge{}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed with many live variants, got %v", err)
+	}
+
+	judge, _ := collector.judge.(*stubOwnershipJudge)
+	if judge == nil || len(judge.seen) != 1 {
+		t.Fatalf("expected one ownership-judge call, got %+v", judge)
+	}
+	if len(judge.seen[0].Candidates) != len(variantSuffixes)-1 {
+		t.Fatalf("expected all live variants to remain eligible for judge submission, got %d of %d", len(judge.seen[0].Candidates), len(variantSuffixes)-1)
+	}
+}
+
 type dnsCollectorTestResolver struct {
+	mu         sync.Mutex
 	ips        map[string][]string
 	mx         map[string][]string
 	ns         map[string][]string
 	txt        map[string][]string
 	cname      map[string]string
 	rdap       map[string]*models.RDAPData
+	errors     map[string]error
 	callCounts map[string]int
+	lookupHits map[string]int
 }
 
 func newDNSCollectorTestResolver() *dnsCollectorTestResolver {
@@ -305,12 +478,17 @@ func newDNSCollectorTestResolver() *dnsCollectorTestResolver {
 		txt:        make(map[string][]string),
 		cname:      make(map[string]string),
 		rdap:       make(map[string]*models.RDAPData),
+		errors:     make(map[string]error),
 		callCounts: make(map[string]int),
+		lookupHits: make(map[string]int),
 	}
 }
 
 func (r *dnsCollectorTestResolver) lookupIPs(ctx context.Context, host string) ([]net.IP, error) {
-	r.callCounts[host]++
+	r.recordLookup("A/AAAA", host)
+	if err, exists := r.errors[lookupKey("A/AAAA", host)]; exists {
+		return nil, err
+	}
 	values, exists := r.ips[host]
 	if !exists {
 		return nil, errors.New("not found")
@@ -327,7 +505,10 @@ func (r *dnsCollectorTestResolver) lookupIPs(ctx context.Context, host string) (
 }
 
 func (r *dnsCollectorTestResolver) lookupMX(ctx context.Context, host string) ([]*net.MX, error) {
-	r.callCounts[host]++
+	r.recordLookup("MX", host)
+	if err, exists := r.errors[lookupKey("MX", host)]; exists {
+		return nil, err
+	}
 	values, exists := r.mx[host]
 	if !exists {
 		return nil, errors.New("not found")
@@ -341,7 +522,10 @@ func (r *dnsCollectorTestResolver) lookupMX(ctx context.Context, host string) ([
 }
 
 func (r *dnsCollectorTestResolver) lookupNS(ctx context.Context, host string) ([]*net.NS, error) {
-	r.callCounts[host]++
+	r.recordLookup("NS", host)
+	if err, exists := r.errors[lookupKey("NS", host)]; exists {
+		return nil, err
+	}
 	values, exists := r.ns[host]
 	if !exists {
 		return nil, errors.New("not found")
@@ -355,7 +539,10 @@ func (r *dnsCollectorTestResolver) lookupNS(ctx context.Context, host string) ([
 }
 
 func (r *dnsCollectorTestResolver) lookupTXT(ctx context.Context, host string) ([]string, error) {
-	r.callCounts[host]++
+	r.recordLookup("TXT", host)
+	if err, exists := r.errors[lookupKey("TXT", host)]; exists {
+		return nil, err
+	}
 	values, exists := r.txt[host]
 	if !exists {
 		return nil, errors.New("not found")
@@ -365,7 +552,10 @@ func (r *dnsCollectorTestResolver) lookupTXT(ctx context.Context, host string) (
 }
 
 func (r *dnsCollectorTestResolver) lookupCNAME(ctx context.Context, host string) (string, error) {
-	r.callCounts[host]++
+	r.recordLookup("CNAME", host)
+	if err, exists := r.errors[lookupKey("CNAME", host)]; exists {
+		return "", err
+	}
 	value, exists := r.cname[host]
 	if !exists {
 		return "", errors.New("not found")
@@ -382,7 +572,32 @@ func (r *dnsCollectorTestResolver) lookupRDAP(ctx context.Context, domain string
 }
 
 func (r *dnsCollectorTestResolver) lookupCount(host string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.callCounts[host]
+}
+
+func (r *dnsCollectorTestResolver) lookupCountByKind(kind string, host string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lookupHits[lookupKey(kind, host)]
+}
+
+func (r *dnsCollectorTestResolver) setLookupError(kind string, host string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errors[lookupKey(kind, host)] = err
+}
+
+func (r *dnsCollectorTestResolver) recordLookup(kind string, host string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.callCounts[host]++
+	r.lookupHits[lookupKey(kind, host)]++
+}
+
+func lookupKey(kind string, host string) string {
+	return kind + "|" + host
 }
 
 func findAssetByIdentifier(assets []models.Asset, identifier string) *models.Asset {

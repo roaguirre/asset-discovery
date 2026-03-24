@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	exportshared "asset-discovery/internal/export/shared"
 	"github.com/xuri/excelize/v2"
 
 	"asset-discovery/internal/models"
@@ -28,7 +29,7 @@ func NewJSONExporter(filepath string) *JSONExporter {
 func (e *JSONExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	pCtx.EnsureAssetState()
 	telemetry.Infof(ctx, "[JSON Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
-	markEnumerationsCompleted(pCtx, time.Now())
+	exportshared.MarkEnumerationsCompleted(pCtx, time.Now())
 
 	if err := os.MkdirAll(filepath.Dir(e.filepath), 0755); err != nil {
 		return pCtx, fmt.Errorf("failed to create directory for JSON output: %w", err)
@@ -63,7 +64,7 @@ func NewCSVExporter(filepath string) *CSVExporter {
 func (e *CSVExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	pCtx.EnsureAssetState()
 	telemetry.Infof(ctx, "[CSV Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
-	markEnumerationsCompleted(pCtx, time.Now())
+	exportshared.MarkEnumerationsCompleted(pCtx, time.Now())
 
 	if err := os.MkdirAll(filepath.Dir(e.filepath), 0755); err != nil {
 		return pCtx, fmt.Errorf("failed to create directory for CSV output: %w", err)
@@ -116,7 +117,7 @@ func NewXLSXExporter(filepath string) *XLSXExporter {
 func (e *XLSXExporter) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	pCtx.EnsureAssetState()
 	telemetry.Infof(ctx, "[XLSX Exporter] Writing %d assets to %s...", len(pCtx.Assets), e.filepath)
-	markEnumerationsCompleted(pCtx, time.Now())
+	exportshared.MarkEnumerationsCompleted(pCtx, time.Now())
 
 	if err := os.MkdirAll(filepath.Dir(e.filepath), 0755); err != nil {
 		return pCtx, fmt.Errorf("failed to create directory for XLSX output: %w", err)

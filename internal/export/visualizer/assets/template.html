@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset Discovery Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600;700&family=Space+Grotesk:wght@400;600;700&display=swap" rel="stylesheet">
+  <style id="visualizer-style-placeholder"></style>
+</head>
+<body>
+  <div class="app-tooltip" id="app-tooltip" role="tooltip" aria-hidden="true"></div>
+  <main>
+    <section class="hero">
+      <div class="eyebrow">Enumeration Results</div>
+      <h1>Asset Discovery Visualizer</h1>
+      <p>All archived discovery runs in one place. Choose a run, filter the table, and sort any column. Expand any row for deep details and trace provenance.</p>
+      <p class="muted">Generated at {{.GeneratedAt}}</p>
+    </section>
+
+    <section class="controls">
+      <div class="field">
+        <label for="run-select">Run</label>
+        <select id="run-select"></select>
+      </div>
+      <div class="field">
+        <label for="search-input">Search</label>
+        <input id="search-input" type="search" placeholder="Filter identifier, registrable domain, details, source, seed, or enumeration">
+      </div>
+
+      <div class="field">
+        <label for="domain-kind-filter">Domain Kind</label>
+        <select id="domain-kind-filter">
+          <option value="">All domain kinds</option>
+        </select>
+      </div>
+      <div class="field" id="resolution-status-field">
+        <label for="resolution-status-filter">Resolution</label>
+        <select id="resolution-status-filter">
+          <option value="">All resolution states</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="source-filter-trigger">Source</label>
+        <div class="multi-select" id="source-filter">
+          <button type="button" class="multi-select-trigger" id="source-filter-trigger" aria-haspopup="true" aria-expanded="false">
+            All sources
+          </button>
+          <div class="multi-select-menu" id="source-filter-menu" hidden>
+            <label class="multi-select-option multi-select-option-all" data-tooltip="Show assets from every source.">
+              <input type="checkbox" data-role="all" checked>
+              <span>All sources</span>
+            </label>
+            <div class="multi-select-options" id="source-filter-options"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="summary">
+      <article class="metric">
+        <span>Archived Runs</span>
+        <strong id="run-count">0</strong>
+      </article>
+      <article class="metric">
+        <span>Selected Run</span>
+        <strong id="selected-run">Latest</strong>
+      </article>
+      <article class="metric">
+        <span>Assets</span>
+        <strong id="asset-count">0</strong>
+      </article>
+      <article class="metric">
+        <span>Enumerations</span>
+        <strong id="enumeration-count">0</strong>
+      </article>
+      <article class="metric">
+        <span>Seeds</span>
+        <strong id="seed-count">0</strong>
+      </article>
+      <article class="metric">
+        <span>Visible Rows</span>
+        <strong id="visible-count">0</strong>
+      </article>
+      <article class="metric">
+        <span>Judge Accepted</span>
+        <strong id="judge-accepted-count">0</strong>
+      </article>
+      <article class="metric">
+        <span>Judge Discarded</span>
+        <strong id="judge-discarded-count">0</strong>
+      </article>
+    </section>
+
+    <section class="table-shell">
+      <div class="table-meta">
+        <div class="table-toolbar">
+          <div class="muted" id="table-caption">No archived runs loaded.</div>
+          <div class="view-toggle" role="tablist" aria-label="Visualizer views">
+            <button type="button" id="domains-view-button" class="is-active">Domains</button>
+            <button type="button" id="ips-view-button">IPs</button>
+            <button type="button" id="judge-view-button">Judge</button>
+            <button type="button" id="trace-view-button">Trace</button>
+          </div>
+        </div>
+        <div id="download-links"></div>
+      </div>
+      <section class="judge-shell" id="judge-shell" hidden>
+        <div>
+          <div class="eyebrow">Judge Analysis</div>
+          <h2>Accepted And Discarded Candidates</h2>
+          <p class="muted" id="judge-caption">No judge evaluations were captured for this run.</p>
+        </div>
+        <div class="judge-groups" id="judge-groups"></div>
+      </section>
+      <div class="table-wrap" id="results-view">
+        <table>
+          <thead id="results-head">
+            <!-- Populated dynamically by JS based on view -->
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+      <p id="empty-state">No rows match the active filters.</p>
+      <section class="trace-view" id="trace-view" hidden>
+        <div class="trace-header">
+          <div>
+            <div class="eyebrow">Result Trace</div>
+            <h2 id="trace-title">Select a result</h2>
+            <p id="trace-subtitle">Choose any result row to inspect its exported provenance, context, and related results.</p>
+          </div>
+          <button type="button" class="trace-back-button" id="trace-back-button">Back To Results</button>
+        </div>
+        <div class="trace-summary" id="trace-summary"></div>
+        <div class="trace-workspace">
+          <aside class="trace-tree-shell">
+            <div class="eyebrow">Trace Tree</div>
+            <div id="trace-tree"></div>
+          </aside>
+          <section class="trace-panel-shell">
+            <div class="eyebrow">Node Details</div>
+            <div id="trace-panel"></div>
+          </section>
+        </div>
+        <div class="trace-related-shell">
+          <h3>Related Results</h3>
+          <div id="trace-related"></div>
+        </div>
+      </section>
+    </section>
+
+    <section class="llm-summary" id="llm-summary">
+      <div class="eyebrow">Machine-Readable Summary</div>
+      <h2>Run Overview</h2>
+      <pre id="llm-summary-text"></pre>
+    </section>
+  </main>
+
+  <script id="visualizer-script-placeholder"></script>
+</body>
+</html>
