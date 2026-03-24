@@ -460,12 +460,42 @@ tbody tr:nth-child(even) { background: rgba(249, 244, 235, 0.6); }
   padding-left: 1.65rem;
 }
 
-.domain-child-identifier {
+.domain-child-identifier, .identifier-with-copy {
   display: inline-flex;
   align-items: center;
+  gap: 0.35rem;
+}
+
+.domain-child-identifier {
   padding-left: 0.9rem;
   margin-left: 0.35rem;
   border-left: 2px solid rgba(190, 106, 21, 0.22);
+}
+
+.copy-trigger {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 150ms ease, background 150ms ease, color 150ms ease;
+}
+
+tr:hover .copy-trigger,
+.copy-trigger:focus-visible {
+  opacity: 0.6;
+}
+
+.copy-trigger:hover,
+tr .copy-trigger:hover {
+  opacity: 1;
+  color: var(--accent-strong);
+  background: rgba(190, 106, 21, 0.1);
 }
 
 /* --- Expandable Detail Row --- */

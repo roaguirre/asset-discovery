@@ -353,7 +353,7 @@
       const observationCount = nodes.filter((node) => node.kind === "observation").length;
       const relationCount = nodes.filter((node) => node.kind === "relation").length;
       const enrichmentCount = nodes.filter((node) => node.kind === "enrichment").length;
-      const colSpan = row.asset_type === "ip" ? 8 : 7;
+      const colSpan = row.asset_type === "ip" ? 9 : 8;
 
       const identityBadges = [
         row.asset_type === "domain" && row.domain_kind ? "<span class=\"pill pill-subtle\">" + escapeHTML(formatDomainKind(row.domain_kind)) + "</span>" : "",
@@ -904,6 +904,7 @@
           <th style="width:2.5rem"></th>
           <th><button type="button" data-key="identifier" data-tooltip="The domain or hostname identifier for this asset.">Identifier</button></th>
           <th><button type="button" data-key="domain_kind" data-tooltip="Whether this domain is a registrable root or a discovered subdomain.">Kind</button></th>
+          <th><button type="button" data-key="ownership_state" data-tooltip="The verified or implicit ownership state of this asset.">Ownership</button></th>
           <th><button type="button" data-key="resolution_status" data-tooltip="Whether the domain currently resolves, was enriched but did not resolve, or has not been checked yet.">Resolution</button></th>
           <th><button type="button" data-key="source" data-tooltip="Collectors and enrichers that contributed this exported result.">Source</button></th>
           <th><button type="button" data-key="status" data-tooltip="Merged enumeration status for the contributing discovery runs.">Status</button></th>
@@ -913,6 +914,7 @@
         resultsHead.innerHTML = `<tr>
           <th style="width:2.5rem"></th>
           <th><button type="button" data-key="identifier" data-tooltip="The IP address identifier for this asset.">Identifier</button></th>
+          <th><button type="button" data-key="ownership_state" data-tooltip="The verified or implicit ownership state of this asset.">Ownership</button></th>
           <th><button type="button" data-key="asn" data-tooltip="Autonomous System Number associated with this IP address.">ASN</button></th>
           <th><button type="button" data-key="organization" data-tooltip="Organization name returned by the IP ownership enrichment lookup.">Organization</button></th>
           <th><button type="button" data-key="ptr" data-tooltip="Reverse DNS hostname returned for this IP address, when one exists.">PTR</button></th>
@@ -940,6 +942,7 @@
           const summaryExpanded = Boolean(summaryRow) && state.expandedRows.has(summaryRow.asset_id);
           const summaryDiscovered = displayRow && displayRow.discovery_date ? new Date(displayRow.discovery_date).toLocaleString() : "";
           const summaryKind = displayRow && displayRow.domain_kind ? formatDomainKind(displayRow.domain_kind) : "Domain";
+          const summaryOwnership = displayRow ? renderOwnershipBadge(displayRow.ownership_state) : "<span class=\"muted\">-</span>";
           const summaryResolution = displayRow ? formatResolutionStatus(displayRow.resolution_status || "-") : "-";
           const summarySource = displayRow ? renderSourceCell(displayRow.source) : "<span class=\"muted\">-</span>";
           const summaryStatus = displayRow ? escapeHTML(displayRow.status || "-") : "-";
@@ -948,8 +951,9 @@
           groupTr.className = "domain-group-row";
           groupTr.innerHTML = [
             "<td><div class=\"domain-group-controls\"><button type=\"button\" class=\"domain-group-toggle\" data-domain-group=\"" + escapeHTML(group.key) + "\" aria-expanded=\"" + (expanded ? "true" : "false") + "\">" + (expanded ? "▼" : "▶") + "</button></div></td>",
-            "<td><div class=\"domain-group-summary\"><div class=\"domain-group-copy\">" + (summaryRow ? "<button type=\"button\" class=\"domain-summary-trigger\" data-summary-asset-id=\"" + escapeHTML(summaryRow.asset_id) + "\" aria-expanded=\"" + (summaryExpanded ? "true" : "false") + "\"><strong>" + summaryIdentifier + "</strong></button>" : "<strong>" + summaryIdentifier + "</strong>") + "<span class=\"pill\">" + group.rows.length + " asset" + (group.rows.length === 1 ? "" : "s") + "</span></div></div></td>",
+            "<td><div class=\"domain-group-summary\"><div class=\"domain-group-copy\">" + (summaryRow ? "<button type=\"button\" class=\"domain-summary-trigger\" data-summary-asset-id=\"" + escapeHTML(summaryRow.asset_id) + "\" aria-expanded=\"" + (summaryExpanded ? "true" : "false") + "\"><strong>" + summaryIdentifier + "</strong></button>" : "<strong>" + summaryIdentifier + "</strong>") + "<span class=\"pill\">" + group.rows.length + " asset" + (group.rows.length === 1 ? "" : "s") + "</span><button type=\"button\" class=\"copy-trigger\" data-copy-value=\"" + escapeHTML(group.key) + "\" aria-label=\"Copy domain\" data-tooltip=\"Copy to clipboard\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg></button></div></div></td>",
             "<td><span class=\"pill\">" + escapeHTML(summaryKind) + "</span></td>",
+            "<td>" + summaryOwnership + "</td>",
             "<td><span class=\"pill pill-subtle\">" + escapeHTML(summaryResolution) + "</span></td>",
             "<td>" + summarySource + "</td>",
             "<td>" + summaryStatus + "</td>",
@@ -977,8 +981,9 @@
             tr.className = "domain-child-row";
             tr.innerHTML = [
               "<td></td>",
-              "<td><div class=\"domain-child-identifier\"><button type=\"button\" class=\"domain-child-trigger\" data-child-asset-id=\"" + escapeHTML(row.asset_id) + "\" aria-expanded=\"" + (isExpanded ? "true" : "false") + "\"><strong>" + escapeHTML(row.identifier) + "</strong></button></div></td>",
+              "<td><div class=\"domain-child-identifier\"><button type=\"button\" class=\"domain-child-trigger\" data-child-asset-id=\"" + escapeHTML(row.asset_id) + "\" aria-expanded=\"" + (isExpanded ? "true" : "false") + "\"><strong>" + escapeHTML(row.identifier) + "</strong></button><button type=\"button\" class=\"copy-trigger\" data-copy-value=\"" + escapeHTML(row.identifier) + "\" aria-label=\"Copy domain\" data-tooltip=\"Copy to clipboard\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg></button></div></td>",
               "<td><span class=\"pill\">" + escapeHTML(kindLabel) + "</span></td>",
+              "<td>" + renderOwnershipBadge(row.ownership_state) + "</td>",
               "<td><span class=\"pill pill-subtle\">" + escapeHTML(formatResolutionStatus(row.resolution_status || "-")) + "</span></td>",
               "<td>" + renderSourceCell(row.source) + "</td>",
               "<td>" + escapeHTML(row.status || "-") + "</td>",
@@ -1002,7 +1007,8 @@
           const tr = document.createElement("tr");
           tr.innerHTML = [
             "<td><button type=\"button\" class=\"detail-toggle\" data-asset-id=\"" + escapeHTML(row.asset_id) + "\">" + (isExpanded ? "▼" : "▶") + "</button></td>",
-            "<td><strong>" + escapeHTML(row.identifier) + "</strong></td>",
+            "<td><div class=\"identifier-with-copy\"><strong>" + escapeHTML(row.identifier) + "</strong><button type=\"button\" class=\"copy-trigger\" data-copy-value=\"" + escapeHTML(row.identifier) + "\" aria-label=\"Copy IP\" data-tooltip=\"Copy to clipboard\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg></button></div></td>",
+            "<td>" + renderOwnershipBadge(row.ownership_state) + "</td>",
             "<td>" + escapeHTML(row.asn ? String(row.asn) : "-") + "</td>",
             "<td>" + escapeHTML(row.organization || "-") + "</td>",
             "<td><span class=\"pill pill-subtle\">" + escapeHTML(row.ptr || "-") + "</span></td>",
@@ -1051,6 +1057,7 @@
         const labels = {
           identifier: "Identifier",
           domain_kind: "Kind",
+          ownership_state: "Ownership",
           resolution_status: "Resolution",
           asset_type: "Type",
           asn: "ASN",
@@ -1137,6 +1144,15 @@
         if (state.expandedDomainGroups.has(groupKey)) { state.expandedDomainGroups.delete(groupKey); }
         else { state.expandedDomainGroups.add(groupKey); }
         renderTable();
+        return;
+      }
+
+      const copyTrigger = event.target.closest(".copy-trigger");
+      if (copyTrigger) {
+        navigator.clipboard.writeText(copyTrigger.dataset.copyValue || "");
+        const originalIcon = copyTrigger.innerHTML;
+        copyTrigger.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>';
+        setTimeout(() => { copyTrigger.innerHTML = originalIcon; }, 1200);
         return;
       }
 
