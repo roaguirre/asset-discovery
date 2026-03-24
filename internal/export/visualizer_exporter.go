@@ -2006,6 +2006,13 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       syncSourceFilterUI();
     }
 
+    function rowsForSourceFilter(runRows) {
+      if (!Array.isArray(runRows)) { return []; }
+      if (state.view === "domains") { return runRows.filter((row) => row.asset_type === "domain"); }
+      if (state.view === "ips") { return runRows.filter((row) => row.asset_type === "ip"); }
+      return runRows;
+    }
+
     function hasActiveDomainFilters() {
       return Boolean(state.search) || Boolean(state.domainKind) || Boolean(state.resolutionStatus) || state.sources.length > 0;
     }
@@ -2776,6 +2783,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       const run = currentRun();
       const rows = run ? run.rows : [];
       const domainRows = rows.filter((row) => row.asset_type === "domain");
+      const sourceRows = rowsForSourceFilter(rows);
       refillFilter(domainKindFilter, uniqueValues(rows, "domain_kind"), "All domain kinds", state.domainKind);
       Array.from(domainKindFilter.options).forEach((option) => {
         if (option.value) { option.textContent = formatDomainKind(option.value); }
@@ -2786,7 +2794,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
         if (option.value) { option.textContent = formatResolutionStatus(option.value); }
       });
       state.resolutionStatus = resolutionStatusFilter.value;
-      refillSourceFilter(rows);
+      refillSourceFilter(sourceRows);
     }
 
     function updateSortIndicators() {
@@ -2840,11 +2848,11 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
     domainKindFilter.addEventListener("change", (event) => { state.domainKind = event.target.value; renderTable(); });
     resolutionStatusFilter.addEventListener("change", (event) => { state.resolutionStatus = event.target.value; renderTable(); });
 
-    domainsViewButton.addEventListener("click", () => { state.view = "domains"; state.traceNodeId = ""; renderTable(); syncHash(); });
-    ipsViewButton.addEventListener("click", () => { state.view = "ips"; state.traceNodeId = ""; renderTable(); syncHash(); });
+    domainsViewButton.addEventListener("click", () => { state.view = "domains"; state.traceNodeId = ""; updateFiltersForRun(); renderTable(); syncHash(); });
+    ipsViewButton.addEventListener("click", () => { state.view = "ips"; state.traceNodeId = ""; updateFiltersForRun(); renderTable(); syncHash(); });
     judgeViewButton.addEventListener("click", () => { state.view = "judge"; state.traceNodeId = ""; renderTable(); syncHash(); });
     traceViewButton.addEventListener("click", () => { openTraceFromCurrentSelection(); });
-    traceBackButton.addEventListener("click", () => { state.view = "domains"; state.traceNodeId = ""; renderTable(); syncHash(); });
+    traceBackButton.addEventListener("click", () => { state.view = "domains"; state.traceNodeId = ""; updateFiltersForRun(); renderTable(); syncHash(); });
 
     sourceFilter.addEventListener("click", (event) => { event.stopPropagation(); });
 

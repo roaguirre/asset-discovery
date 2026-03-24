@@ -178,6 +178,9 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		"expandedDomainGroups",
 		"domain-group-toggle",
 		"Showing \" + domainGroups.length + \" registrable domains",
+		"function rowsForSourceFilter(runRows)",
+		`if (state.view === "domains") { return runRows.filter((row) => row.asset_type === "domain"); }`,
+		`if (state.view === "ips") { return runRows.filter((row) => row.asset_type === "ip"); }`,
 	} {
 		if !strings.Contains(html, needle) {
 			t.Fatalf("expected rendered HTML to contain %q", needle)
