@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -225,4 +226,16 @@ func RelativeOutputPath(fromFile, toFile string) string {
 	}
 
 	return filepath.ToSlash(rel)
+}
+
+func RefreshVisualizerHTML(path string) error {
+	if path == "" {
+		path = DefaultVisualizerOutput
+	}
+
+	if err := export.RefreshVisualizerHTML(path); err != nil {
+		return fmt.Errorf("refresh visualizer %s: %w", path, err)
+	}
+
+	return nil
 }

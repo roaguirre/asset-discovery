@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	seedsFile string
-	outputs   []string
+	seedsFile      string
+	outputs        []string
+	visualizerPath string
 )
 
 var rootCmd = &cobra.Command{
@@ -53,6 +54,20 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.Flags().StringVarP(&seedsFile, "seeds", "s", "", "Path to seeds JSON file")
 	rootCmd.Flags().StringSliceVarP(&outputs, "outputs", "o", nil, "Comma separated list of output paths. If omitted, timestamped JSON/CSV/XLSX exports are written under exports/runs/<run-id>/ and exports/visualizer.html is refreshed.")
+
+	refreshVisualizerCmd := &cobra.Command{
+		Use:   "refresh-visualizer",
+		Short: "Rebuild visualizer.html from archived visualizer snapshots",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := app.RefreshVisualizerHTML(visualizerPath); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Refreshed %s\n", visualizerPath)
+			return nil
+		},
+	}
+	refreshVisualizerCmd.Flags().StringVar(&visualizerPath, "path", app.DefaultVisualizerOutput, "Path to the visualizer HTML file to rebuild from archived snapshots")
+	rootCmd.AddCommand(refreshVisualizerCmd)
 }
 
 func main() {

@@ -76,6 +76,27 @@ func (e *VisualizerExporter) Process(ctx context.Context, pCtx *models.PipelineC
 	return pCtx, nil
 }
 
+func RefreshVisualizerHTML(path string) error {
+	storageDir := strings.TrimSuffix(path, filepath.Ext(path))
+	manifestPath := filepath.Join(storageDir, "manifest.json")
+
+	manifest, err := readVisualizerManifest(manifestPath)
+	if err != nil {
+		return fmt.Errorf("failed to read visualizer manifest: %w", err)
+	}
+
+	runs, err := loadVisualizerRuns(storageDir, manifest)
+	if err != nil {
+		return fmt.Errorf("failed to load visualizer runs: %w", err)
+	}
+
+	if err := renderVisualizerHTML(path, runs); err != nil {
+		return fmt.Errorf("failed to render visualizer HTML: %w", err)
+	}
+
+	return nil
+}
+
 func markEnumerationsCompleted(pCtx *models.PipelineContext, completedAt time.Time) {
 	for i := range pCtx.Enumerations {
 		if pCtx.Enumerations[i].StartedAt.IsZero() {
@@ -2037,6 +2058,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       groups.forEach((group) => {
         const registrable = group.rows.find((row) => row.domain_kind === "registrable");
         const others = group.rows.filter((row) => !registrable || row.asset_id !== registrable.asset_id);
+        group.summaryRow = registrable || group.rows[0] || null;
         group.rows = registrable ? [registrable].concat(others) : group.rows.slice();
       });
 
@@ -2689,7 +2711,6 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
           <th><button type="button" data-key="discovery_date" data-tooltip="When this result was first observed in the current exported run.">Discovered</button></th>
         </tr>` + "`" + `;
       }
-      if (showResults) {
         resultsHead.querySelectorAll("button").forEach((button) => {
           button.addEventListener("click", () => {
             const { key } = button.dataset;
@@ -2703,18 +2724,24 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
       if (showDomains) {
         domainGroups.forEach((group) => {
           const expanded = isDomainGroupExpanded(group.key);
+          const summaryRow = group.summaryRow || group.rows[0] || null;
+          const childRows = group.rows.filter((row) => !summaryRow || row.asset_id !== summaryRow.asset_id);
+          const summaryDiscovered = summaryRow && summaryRow.discovery_date ? new Date(summaryRow.discovery_date).toLocaleString() : "";
+          const summaryKind = summaryRow && summaryRow.domain_kind ? formatDomainKind(summaryRow.domain_kind) : "Domain";
+          const summaryResolution = summaryRow ? formatResolutionStatus(summaryRow.resolution_status || "-") : "-";
+          const summarySource = summaryRow ? renderSourceCell(summaryRow.source) : "<span class=\"muted\">-</span>";
+          const summaryStatus = summaryRow ? escapeHTML(summaryRow.status || "-") : "-";
+          const summaryIdentifier = summaryRow ? escapeHTML(summaryRow.identifier || group.key) : escapeHTML(group.key);
           const groupTr = document.createElement("tr");
           groupTr.className = "domain-group-row";
           groupTr.innerHTML = [
-            "<td colspan=\"7\">",
-            "<div class=\"domain-group-summary\">",
-            "<button type=\"button\" class=\"domain-group-toggle\" data-domain-group=\"" + escapeHTML(group.key) + "\" aria-expanded=\"" + (expanded ? "true" : "false") + "\">" + (expanded ? "▼" : "▶") + "</button>",
-            "<div class=\"domain-group-copy\">",
-            "<span>" + escapeHTML(group.key) + "</span>",
-            "<span class=\"pill\">" + group.rows.length + " asset" + (group.rows.length === 1 ? "" : "s") + "</span>",
-            "</div>",
-            "</div>",
-            "</td>",
+            "<td><button type=\"button\" class=\"domain-group-toggle\" data-domain-group=\"" + escapeHTML(group.key) + "\" aria-expanded=\"" + (expanded ? "true" : "false") + "\">" + (expanded ? "▼" : "▶") + "</button></td>",
+            "<td><div class=\"domain-group-summary\"><div class=\"domain-group-copy\"><strong>" + summaryIdentifier + "</strong><span class=\"pill\">" + group.rows.length + " asset" + (group.rows.length === 1 ? "" : "s") + "</span></div></div></td>",
+            "<td><span class=\"pill\">" + escapeHTML(summaryKind) + "</span></td>",
+            "<td><span class=\"pill pill-subtle\">" + escapeHTML(summaryResolution) + "</span></td>",
+            "<td>" + summarySource + "</td>",
+            "<td>" + summaryStatus + "</td>",
+            "<td>" + escapeHTML(summaryDiscovered) + "</td>",
           ].join("");
           body.appendChild(groupTr);
 
@@ -2722,7 +2749,7 @@ var visualizerTemplate = template.Must(template.New("visualizer").Parse(`<!DOCTY
             return;
           }
 
-          group.rows.forEach((row) => {
+          childRows.forEach((row) => {
             const discovered = row.discovery_date ? new Date(row.discovery_date).toLocaleString() : "";
             const kindLabel = row.domain_kind ? formatDomainKind(row.domain_kind) : row.asset_type || "-";
             const isExpanded = state.expandedRows.has(row.asset_id);
