@@ -134,8 +134,14 @@ func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
 	if snapshot.Run.PendingPivotCount != 1 {
 		t.Fatalf("expected one pending pivot, got %d", snapshot.Run.PendingPivotCount)
 	}
+	if snapshot.Run.JudgeEvaluationCount != 1 || snapshot.Run.JudgeAcceptedCount != 1 || snapshot.Run.JudgeDiscardedCount != 0 {
+		t.Fatalf("expected judge counters to be tracked in the snapshot, got %+v", snapshot.Run)
+	}
 	if len(projection.Pivots[run.ID]) != 1 {
 		t.Fatalf("expected one projected pivot, got %d", len(projection.Pivots[run.ID]))
+	}
+	if summary := projection.JudgeSummaries[run.ID]; summary.EvaluationCount != 1 || summary.AcceptedCount != 1 || summary.DiscardedCount != 0 {
+		t.Fatalf("expected projected judge summary to be available, got %+v", summary)
 	}
 
 	var pivotID string
@@ -167,6 +173,9 @@ func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
 	}
 	if len(projection.Assets[run.ID]) == 0 {
 		t.Fatalf("expected projected assets to be present")
+	}
+	if summary := projection.JudgeSummaries[run.ID]; summary.EvaluationCount != 1 || summary.AcceptedCount != 1 || summary.DiscardedCount != 0 {
+		t.Fatalf("expected projected judge summary to survive resume, got %+v", summary)
 	}
 	if len(projection.Events[run.ID]) == 0 {
 		t.Fatalf("expected mutation events to be projected")

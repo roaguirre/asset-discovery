@@ -37,6 +37,19 @@ func (s *FirestoreProjectionStore) UpsertPivot(ctx context.Context, runID string
 	return err
 }
 
+func (s *FirestoreProjectionStore) UpsertJudgeSummary(
+	ctx context.Context,
+	runID string,
+	summary lineage.JudgeSummary,
+) error {
+	payload, err := firestoreJSONDocument(summary)
+	if err != nil {
+		return fmt.Errorf("marshal judge summary: %w", err)
+	}
+	_, err = s.runDoc(runID).Collection("analysis").Doc("judge_summary").Set(ctx, payload)
+	return err
+}
+
 func (s *FirestoreProjectionStore) AppendEvent(ctx context.Context, runID string, event EventRecord) error {
 	_, err := s.runDoc(runID).Collection("events").Doc(event.ID).Set(ctx, event)
 	return err

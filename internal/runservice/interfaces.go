@@ -17,6 +17,7 @@ type ProjectionStore interface {
 	UpsertRun(ctx context.Context, run RunRecord) error
 	UpsertSeed(ctx context.Context, runID string, seed SeedRecord) error
 	UpsertPivot(ctx context.Context, runID string, pivot PivotRecord) error
+	UpsertJudgeSummary(ctx context.Context, runID string, summary lineage.JudgeSummary) error
 	AppendEvent(ctx context.Context, runID string, event EventRecord) error
 	UpsertAsset(ctx context.Context, runID string, row visualizer.Row) error
 	SyncTraces(ctx context.Context, runID string, traces []lineage.Trace) error

@@ -98,6 +98,16 @@ func (l *projectionMutationListener) OnJudgeEvaluationRecorded(evaluation models
 		},
 	}); err != nil {
 		l.setErr(fmt.Errorf("project judge event from %s: %w", evaluation.Collector, err))
+		return
+	}
+
+	snapshot := l.pCtx.SnapshotReadModel()
+	if err := l.syncJudgeProjection(snapshot); err != nil {
+		l.setErr(err)
+		return
+	}
+	if err := l.syncRunProjection(snapshot); err != nil {
+		l.setErr(err)
 	}
 }
 
@@ -129,15 +139,21 @@ func buildProjectedRow(run RunRecord, pCtx *models.PipelineContext, assetID stri
 
 func (l *projectionMutationListener) syncRunProjection(snapshot models.PipelineContext) error {
 	l.mu.Lock()
-	l.run.AssetCount = len(snapshot.Assets)
-	l.run.EnumerationCount = len(snapshot.Enumerations)
-	l.run.SeedCount = len(snapshot.Seeds)
+	judgeSummary := buildProjectedJudgeSummary(&snapshot)
+	applyProjectedRunMetrics(&l.run, &snapshot, l.run.PendingPivotCount, judgeSummary)
 	l.run.UpdatedAt = l.now()
 	run := l.run
 	l.mu.Unlock()
 
 	if err := l.projection.UpsertRun(l.ctx, run); err != nil {
 		return fmt.Errorf("project run counts: %w", err)
+	}
+	return nil
+}
+
+func (l *projectionMutationListener) syncJudgeProjection(snapshot models.PipelineContext) error {
+	if err := l.projection.UpsertJudgeSummary(l.ctx, l.run.ID, buildProjectedJudgeSummary(&snapshot)); err != nil {
+		return fmt.Errorf("project judge summary: %w", err)
 	}
 	return nil
 }

@@ -9,23 +9,25 @@ import (
 )
 
 type MemoryProjectionStore struct {
-	mu     sync.Mutex
-	Runs   map[string]RunRecord
-	Seeds  map[string]map[string]SeedRecord
-	Pivots map[string]map[string]PivotRecord
-	Events map[string][]EventRecord
-	Assets map[string]map[string]visualizer.Row
-	Traces map[string]map[string]lineage.Trace
+	mu             sync.Mutex
+	Runs           map[string]RunRecord
+	Seeds          map[string]map[string]SeedRecord
+	Pivots         map[string]map[string]PivotRecord
+	JudgeSummaries map[string]lineage.JudgeSummary
+	Events         map[string][]EventRecord
+	Assets         map[string]map[string]visualizer.Row
+	Traces         map[string]map[string]lineage.Trace
 }
 
 func NewMemoryProjectionStore() *MemoryProjectionStore {
 	return &MemoryProjectionStore{
-		Runs:   make(map[string]RunRecord),
-		Seeds:  make(map[string]map[string]SeedRecord),
-		Pivots: make(map[string]map[string]PivotRecord),
-		Events: make(map[string][]EventRecord),
-		Assets: make(map[string]map[string]visualizer.Row),
-		Traces: make(map[string]map[string]lineage.Trace),
+		Runs:           make(map[string]RunRecord),
+		Seeds:          make(map[string]map[string]SeedRecord),
+		Pivots:         make(map[string]map[string]PivotRecord),
+		JudgeSummaries: make(map[string]lineage.JudgeSummary),
+		Events:         make(map[string][]EventRecord),
+		Assets:         make(map[string]map[string]visualizer.Row),
+		Traces:         make(map[string]map[string]lineage.Trace),
 	}
 }
 
@@ -56,6 +58,18 @@ func (s *MemoryProjectionStore) UpsertPivot(_ context.Context, runID string, piv
 		s.Pivots[runID] = make(map[string]PivotRecord)
 	}
 	s.Pivots[runID][pivot.ID] = pivot
+	return nil
+}
+
+func (s *MemoryProjectionStore) UpsertJudgeSummary(
+	_ context.Context,
+	runID string,
+	summary lineage.JudgeSummary,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.JudgeSummaries[runID] = summary
 	return nil
 }
 

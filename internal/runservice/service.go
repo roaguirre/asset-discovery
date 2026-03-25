@@ -115,6 +115,9 @@ func (s *Service) CreateRun(ctx context.Context, user AuthenticatedUser, request
 	if err := s.projection.UpsertRun(ctx, run); err != nil {
 		return RunRecord{}, fmt.Errorf("project run: %w", err)
 	}
+	if err := s.projection.UpsertJudgeSummary(ctx, runID, buildProjectedJudgeSummary(&snapshot.Context)); err != nil {
+		return RunRecord{}, fmt.Errorf("project judge summary: %w", err)
+	}
 
 	for _, seed := range seeds {
 		if err := s.projection.UpsertSeed(ctx, runID, SeedRecord{
@@ -409,13 +412,14 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 
 func (s *Service) projectSnapshot(ctx context.Context, snapshot *Snapshot) error {
 	projectedRun := visualizer.BuildRun(snapshot.Run.ID, snapshot.Run.CreatedAt, snapshot.Run.Downloads, &snapshot.Context)
-	snapshot.Run.AssetCount = projectedRun.AssetCount
-	snapshot.Run.EnumerationCount = projectedRun.EnumerationCount
-	snapshot.Run.SeedCount = projectedRun.SeedCount
-	snapshot.Run.PendingPivotCount = countPendingPivots(snapshot.Pivots)
+	judgeSummary := buildProjectedJudgeSummary(&snapshot.Context)
+	applyProjectedRunMetrics(&snapshot.Run, &snapshot.Context, countPendingPivots(snapshot.Pivots), judgeSummary)
 
 	if err := s.projection.UpsertRun(ctx, snapshot.Run); err != nil {
 		return fmt.Errorf("upsert run: %w", err)
+	}
+	if err := s.projection.UpsertJudgeSummary(ctx, snapshot.Run.ID, judgeSummary); err != nil {
+		return fmt.Errorf("upsert judge summary: %w", err)
 	}
 	for _, row := range projectedRun.Rows {
 		if err := s.projection.UpsertAsset(ctx, snapshot.Run.ID, row); err != nil {
@@ -463,10 +467,8 @@ func buildDownloads(outputs []string) visualizer.Downloads {
 }
 
 func updateRunCounters(snapshot *Snapshot) {
-	snapshot.Run.AssetCount = len(snapshot.Context.Assets)
-	snapshot.Run.EnumerationCount = len(snapshot.Context.Enumerations)
-	snapshot.Run.SeedCount = len(snapshot.Context.Seeds)
-	snapshot.Run.PendingPivotCount = countPendingPivots(snapshot.Pivots)
+	judgeSummary := buildProjectedJudgeSummary(&snapshot.Context)
+	applyProjectedRunMetrics(&snapshot.Run, &snapshot.Context, countPendingPivots(snapshot.Pivots), judgeSummary)
 	snapshot.Run.CurrentWave = snapshot.Progress.Wave
 }
 

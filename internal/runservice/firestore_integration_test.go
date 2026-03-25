@@ -42,18 +42,21 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 	now := time.Date(2026, time.March, 25, 12, 0, 0, 0, time.UTC)
 
 	run := RunRecord{
-		ID:                "run-firestore",
-		OwnerUID:          "uid-owner",
-		OwnerEmail:        "analyst@zerofox.com",
-		Mode:              RunModeManual,
-		Status:            RunStatusRunning,
-		CurrentWave:       2,
-		SeedCount:         1,
-		EnumerationCount:  1,
-		AssetCount:        1,
-		PendingPivotCount: 1,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                   "run-firestore",
+		OwnerUID:             "uid-owner",
+		OwnerEmail:           "analyst@zerofox.com",
+		Mode:                 RunModeManual,
+		Status:               RunStatusRunning,
+		CurrentWave:          2,
+		SeedCount:            1,
+		EnumerationCount:     1,
+		AssetCount:           1,
+		PendingPivotCount:    1,
+		JudgeEvaluationCount: 1,
+		JudgeAcceptedCount:   1,
+		JudgeDiscardedCount:  0,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 	seed := SeedRecord{
 		ID:          "seed-1",
@@ -109,6 +112,19 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 			{ID: "node-1", Kind: "asset", Label: "example.com"},
 		},
 	}
+	judgeSummary := lineage.JudgeSummary{
+		EvaluationCount: 1,
+		AcceptedCount:   1,
+		DiscardedCount:  0,
+		Groups: []lineage.JudgeGroup{
+			{
+				Collector: "web_hint_collector",
+				Accepted: []lineage.JudgeCandidate{
+					{Root: "pivot.example.com", Confidence: 0.97, Kind: "brand_overlap"},
+				},
+			},
+		},
+	}
 
 	if err := store.UpsertRun(ctx, run); err != nil {
 		t.Fatalf("UpsertRun() error = %v", err)
@@ -118,6 +134,9 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 	}
 	if err := store.UpsertPivot(ctx, run.ID, pivot); err != nil {
 		t.Fatalf("UpsertPivot() error = %v", err)
+	}
+	if err := store.UpsertJudgeSummary(ctx, run.ID, judgeSummary); err != nil {
+		t.Fatalf("UpsertJudgeSummary() error = %v", err)
 	}
 	if err := store.AppendEvent(ctx, run.ID, event); err != nil {
 		t.Fatalf("AppendEvent() error = %v", err)
@@ -140,6 +159,9 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 	}
 	if gotRun.OwnerUID != run.OwnerUID || gotRun.Status != run.Status {
 		t.Fatalf("unexpected run projection: %+v", gotRun)
+	}
+	if gotRun.JudgeEvaluationCount != run.JudgeEvaluationCount || gotRun.JudgeAcceptedCount != run.JudgeAcceptedCount {
+		t.Fatalf("unexpected judge counts in run projection: %+v", gotRun)
 	}
 
 	assetDoc, err := client.Collection("runs").Doc(run.ID).Collection("assets").Doc(row.AssetID).Get(ctx)
@@ -166,6 +188,19 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 	}
 	if _, exists := traceData["RootNodeID"]; exists {
 		t.Fatalf("expected trace projection to use snake_case keys, got %+v", traceData)
+	}
+
+	summaryDoc, err := client.Collection("runs").Doc(run.ID).Collection("analysis").Doc("judge_summary").Get(ctx)
+	if err != nil {
+		t.Fatalf("Get(judge_summary) error = %v", err)
+	}
+
+	summaryData := summaryDoc.Data()
+	if got := summaryData["evaluation_count"]; got != int64(judgeSummary.EvaluationCount) {
+		t.Fatalf("expected evaluation count %d, got %#v", judgeSummary.EvaluationCount, got)
+	}
+	if _, exists := summaryData["EvaluationCount"]; exists {
+		t.Fatalf("expected judge summary projection to use snake_case keys, got %+v", summaryData)
 	}
 }
 
@@ -272,6 +307,21 @@ func TestService_ManualRun_ProjectsToFirestoreEmulator(t *testing.T) {
 	if queued.Status != RunStatusQueued {
 		t.Fatalf("expected queued status after create, got %s", queued.Status)
 	}
+	if queued.JudgeEvaluationCount != 0 || queued.JudgeAcceptedCount != 0 || queued.JudgeDiscardedCount != 0 {
+		t.Fatalf("expected zero judge counts after create, got %+v", queued)
+	}
+
+	queuedSummaryDoc, err := client.Collection("runs").Doc(run.ID).Collection("analysis").Doc("judge_summary").Get(ctx)
+	if err != nil {
+		t.Fatalf("Get(created judge_summary) error = %v", err)
+	}
+	var queuedSummary lineage.JudgeSummary
+	if err := queuedSummaryDoc.DataTo(&queuedSummary); err != nil {
+		t.Fatalf("DataTo(created judge_summary) error = %v", err)
+	}
+	if queuedSummary.EvaluationCount != 0 || queuedSummary.AcceptedCount != 0 || queuedSummary.DiscardedCount != 0 {
+		t.Fatalf("expected zeroed judge summary after create, got %+v", queuedSummary)
+	}
 
 	seedDocs, err := client.Collection("runs").Doc(run.ID).Collection("seeds").Documents(ctx).GetAll()
 	if err != nil {
@@ -298,6 +348,9 @@ func TestService_ManualRun_ProjectsToFirestoreEmulator(t *testing.T) {
 	}
 	if paused.PendingPivotCount != 1 {
 		t.Fatalf("expected one pending pivot, got %d", paused.PendingPivotCount)
+	}
+	if paused.JudgeEvaluationCount != 1 || paused.JudgeAcceptedCount != 1 || paused.JudgeDiscardedCount != 0 {
+		t.Fatalf("expected paused run judge counts to be projected, got %+v", paused)
 	}
 
 	pivotDocs, err := client.Collection("runs").Doc(run.ID).Collection("pivots").Documents(ctx).GetAll()
@@ -338,6 +391,21 @@ func TestService_ManualRun_ProjectsToFirestoreEmulator(t *testing.T) {
 	}
 	if completed.Status != RunStatusCompleted {
 		t.Fatalf("expected completed status, got %s", completed.Status)
+	}
+	if completed.JudgeEvaluationCount != 1 || completed.JudgeAcceptedCount != 1 || completed.JudgeDiscardedCount != 0 {
+		t.Fatalf("expected completed run judge counts to persist, got %+v", completed)
+	}
+
+	completedSummaryDoc, err := client.Collection("runs").Doc(run.ID).Collection("analysis").Doc("judge_summary").Get(ctx)
+	if err != nil {
+		t.Fatalf("Get(completed judge_summary) error = %v", err)
+	}
+	var completedSummary lineage.JudgeSummary
+	if err := completedSummaryDoc.DataTo(&completedSummary); err != nil {
+		t.Fatalf("DataTo(completed judge_summary) error = %v", err)
+	}
+	if completedSummary.EvaluationCount != 1 || completedSummary.AcceptedCount != 1 || completedSummary.DiscardedCount != 0 {
+		t.Fatalf("expected completed judge summary to persist, got %+v", completedSummary)
 	}
 
 	assetDocs, err := client.Collection("runs").Doc(run.ID).Collection("assets").Documents(ctx).GetAll()
