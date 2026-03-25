@@ -12,6 +12,7 @@ import (
 
 	"asset-discovery/internal/app"
 	"asset-discovery/internal/dag"
+	export "asset-discovery/internal/export"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/tracing/lineage"
 	"asset-discovery/internal/tracing/telemetry"
@@ -54,8 +55,13 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 		JudgeEvaluationCount: 1,
 		JudgeAcceptedCount:   1,
 		JudgeDiscardedCount:  0,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		Downloads: export.Downloads{
+			JSON: "runs/run-firestore/results.json",
+			CSV:  "runs/run-firestore/results.csv",
+			XLSX: "runs/run-firestore/results.xlsx",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	seed := SeedRecord{
 		ID:          "seed-1",
@@ -161,6 +167,21 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 	}
 	if gotRun.JudgeEvaluationCount != run.JudgeEvaluationCount || gotRun.JudgeAcceptedCount != run.JudgeAcceptedCount {
 		t.Fatalf("unexpected judge counts in run projection: %+v", gotRun)
+	}
+	if gotRun.Downloads != run.Downloads {
+		t.Fatalf("unexpected downloads in run projection: %+v", gotRun.Downloads)
+	}
+
+	runData := runDoc.Data()
+	downloads, ok := runData["downloads"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected downloads map, got %#v", runData["downloads"])
+	}
+	if got := downloads["json"]; got != run.Downloads.JSON {
+		t.Fatalf("expected lowercase json download key %q, got %#v", run.Downloads.JSON, got)
+	}
+	if _, exists := downloads["JSON"]; exists {
+		t.Fatalf("expected run downloads to use lowercase keys, got %+v", downloads)
 	}
 
 	assetDoc, err := client.Collection("runs").Doc(run.ID).Collection("assets").Doc(row.AssetID).Get(ctx)
@@ -271,6 +292,7 @@ func TestService_ManualRun_ProjectsToFirestoreEmulator(t *testing.T) {
 		PipelineFactory: factory,
 		Checkpoints:     checkpoints,
 		Projection:      projection,
+		Artifacts:       &capturingArtifactStore{},
 		Now:             now,
 	})
 	if err != nil {

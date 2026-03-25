@@ -45,19 +45,22 @@ go build -o discover cmd/discover/main.go
 ```bash
 export ASSET_DISCOVERY_FIREBASE_PROJECT_ID="your-project-id"
 export ASSET_DISCOVERY_SERVER_ADDR=":8080"
+export ASSET_DISCOVERY_EXPORT_GCS_BUCKET="your-artifact-bucket"
 
 # Optional when running with a service-account file locally.
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 
 # Optional: use GCS for resumable run checkpoints instead of the local checkpoints/ directory.
 export ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET="your-checkpoint-bucket"
+export ASSET_DISCOVERY_EXPORT_GCS_PREFIX="runs"
 
 go run ./cmd/server
 ```
 
-For local development, you can also place those variables in `.env.local` and run:
+For local development, you can copy `.env.example` to `.env.local`, fill in the values, and run:
 
 ```bash
+cp .env.example .env.local
 make server
 ```
 
@@ -66,6 +69,7 @@ make server
 The live server keeps the browser-facing read model in Firestore and the resumable runtime checkpoint outside Firestore:
 
 - Firestore stores runs, assets, traces, pivots, seeds, and activity events for the web client.
+- downloadable run artifacts are uploaded to the Firebase Storage bucket configured by `ASSET_DISCOVERY_EXPORT_GCS_BUCKET`.
 - checkpoints are stored either under the local `checkpoints/` directory or in GCS when `ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET` is configured.
 - the worker is queue-ready but currently runs in-process inside the Go server.
 
@@ -107,6 +111,8 @@ npm run dev
 
 Leave `VITE_ASSET_DISCOVERY_API_BASE_URL` empty in the web app for local development. Vite proxies `/api/*` and `/healthz` to `http://127.0.0.1:8080`, which avoids cross-origin browser calls during local work.
 
+The live download flow no longer serves local `exports/runs/...` files directly. New runs need `ASSET_DISCOVERY_EXPORT_GCS_BUCKET` on the Go server and `VITE_FIREBASE_EXPORTS_BUCKET` in the web app so downloadable artifacts are published to Firebase Storage.
+
 For Firestore-backed integration coverage against the real emulator:
 
 ```bash
@@ -117,7 +123,7 @@ That target starts the Firestore emulator using the sibling `asset-discovery-web
 
 `make test-firebase` uses the Firestore emulator port from the sibling Firebase config. If you are already running another service on that port, stop it first or run the emulator test with a temporary alternate config.
 
-When `--outputs` is omitted, each run writes `results.json`, `results.csv`, and `results.xlsx` under `exports/runs/<run-id>/`.
+When `--outputs` is omitted, each CLI run writes `results.json`, `results.csv`, and `results.xlsx` under `exports/runs/<run-id>/`.
 
 Exports separate registrable domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `registrable_domain` metadata, CSV includes `Domain Kind` and `Registrable Domain` columns, and XLSX uses dedicated `Registrable Domains` and `Subdomains` sheets.
 

@@ -88,7 +88,7 @@ func TestHandler_NoOriginRequestSkipsCORS(t *testing.T) {
 func TestHandler_DecidePivotMapsErrorStatuses(t *testing.T) {
 	t.Parallel()
 
-	service, _, projection, run := newTestService(t, RunModeManual)
+	service, _, projection, run := newTestService(t, RunModeManual, &capturingArtifactStore{})
 	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
 		t.Fatalf("ProcessRun() error = %v", err)
 	}

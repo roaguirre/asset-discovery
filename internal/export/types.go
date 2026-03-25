@@ -7,9 +7,9 @@ import (
 
 // Downloads lists the file artifacts emitted for a completed run.
 type Downloads struct {
-	JSON string `json:"json,omitempty"`
-	CSV  string `json:"csv,omitempty"`
-	XLSX string `json:"xlsx,omitempty"`
+	JSON string `json:"json,omitempty" firestore:"json,omitempty"`
+	CSV  string `json:"csv,omitempty" firestore:"csv,omitempty"`
+	XLSX string `json:"xlsx,omitempty" firestore:"xlsx,omitempty"`
 }
 
 type DomainKind = exportshared.DomainKind

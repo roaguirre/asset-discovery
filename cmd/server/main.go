@@ -42,12 +42,19 @@ func main() {
 	}
 	defer firestoreClient.Close()
 
+	storageClient, err := storage.NewClient(ctx, options...)
+	if err != nil {
+		log.Fatalf("create storage client: %v", err)
+	}
+	defer storageClient.Close()
+
 	authVerifier, err := runservice.NewFirebaseVerifierFromApp(ctx, firebaseApp)
 	if err != nil {
 		log.Fatalf("create firebase verifier: %v", err)
 	}
 
-	checkpointStore := buildCheckpointStore(ctx, options)
+	checkpointStore := buildCheckpointStore(storageClient)
+	artifactStore := buildArtifactStore(storageClient)
 	projection := runservice.NewFirestoreProjectionStore(firestoreClient)
 
 	pipelineFactory := func(runID string) (*app.Pipeline, error) {
@@ -65,6 +72,7 @@ func main() {
 		PipelineFactory: pipelineFactory,
 		Checkpoints:     checkpointStore,
 		Projection:      projection,
+		Artifacts:       artifactStore,
 		Now:             time.Now,
 	})
 	if err != nil {
@@ -102,13 +110,9 @@ func firebaseOptions() []option.ClientOption {
 	return []option.ClientOption{option.WithCredentialsFile(credentialsFile)}
 }
 
-func buildCheckpointStore(ctx context.Context, options []option.ClientOption) runservice.CheckpointStore {
+func buildCheckpointStore(storageClient *storage.Client) runservice.CheckpointStore {
 	bucket := strings.TrimSpace(os.Getenv("ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET"))
 	if bucket != "" {
-		storageClient, err := storage.NewClient(ctx, options...)
-		if err != nil {
-			log.Fatalf("create storage client: %v", err)
-		}
 		return runservice.NewGCSCheckpointStore(storageClient, bucket, strings.TrimSpace(os.Getenv("ASSET_DISCOVERY_CHECKPOINT_GCS_PREFIX")))
 	}
 
@@ -117,6 +121,18 @@ func buildCheckpointStore(ctx context.Context, options []option.ClientOption) ru
 		root = "checkpoints"
 	}
 	return runservice.NewFileCheckpointStore(root)
+}
+
+func buildArtifactStore(storageClient *storage.Client) runservice.ArtifactStore {
+	bucket := strings.TrimSpace(os.Getenv("ASSET_DISCOVERY_EXPORT_GCS_BUCKET"))
+	if bucket == "" {
+		log.Fatal("ASSET_DISCOVERY_EXPORT_GCS_BUCKET is required")
+	}
+	prefix := strings.Trim(strings.TrimSpace(os.Getenv("ASSET_DISCOVERY_EXPORT_GCS_PREFIX")), "/")
+	if strings.Contains(prefix, "/") {
+		log.Fatal("ASSET_DISCOVERY_EXPORT_GCS_PREFIX must be empty or a single path segment")
+	}
+	return runservice.NewGCSArtifactStore(storageClient, bucket, prefix)
 }
 
 func splitCommaSeparated(value string) []string {

@@ -30,6 +30,15 @@ This file describes how AI coding assistants should interact with this repositor
 10. **Canonical Upserts Only**: When emitting discovered assets or runtime relations, prefer the canonical helper paths on `PipelineContext` instead of direct append patterns. The runtime model relies on those helpers to maintain canonical assets, observations, provenance, and relations consistently.
 11. **Enrich Canonical Assets**: Enrichers should iterate canonical assets and use per-stage enrichment state for cache / retry decisions. A new observation or contributor should add provenance, not force duplicate network work by default.
 
+### Local Dev
+
+- Preferred local server command: `make server`
+- Copy `.env.example` to `.env.local` for local server configuration
+- `make server` loads `.env.local` before running `go run ./cmd/server`
+- Primary verification command: `go test ./...`
+- Firestore emulator coverage: `make test-firebase`
+- `make test-firebase` uses the Firestore emulator port from the sibling `asset-discovery-web/firebase.json`; stop anything already bound to that port before running it
+
 ### Adding New Stages
 
 To add a new stage to the DAG:

@@ -3,6 +3,7 @@ package runservice
 import (
 	"context"
 
+	export "asset-discovery/internal/export"
 	"asset-discovery/internal/tracing/lineage"
 )
 
@@ -20,6 +21,12 @@ type ProjectionStore interface {
 	AppendEvent(ctx context.Context, runID string, event EventRecord) error
 	UpsertAsset(ctx context.Context, runID string, row AssetRow) error
 	SyncTraces(ctx context.Context, runID string, traces []lineage.Trace) error
+}
+
+// ArtifactStore publishes the completed run exports that the live web client
+// can later download.
+type ArtifactStore interface {
+	Publish(ctx context.Context, runID string, downloads export.Downloads) (export.Downloads, error)
 }
 
 type Dispatcher interface {

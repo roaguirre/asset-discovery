@@ -3,16 +3,40 @@ package runservice
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"asset-discovery/internal/app"
 	"asset-discovery/internal/dag"
+	export "asset-discovery/internal/export"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/tracing/telemetry"
 )
 
 type scriptedCollector struct{}
+
+type capturingArtifactStore struct {
+	fail      error
+	published export.Downloads
+	calls     []export.Downloads
+}
+
+func (s *capturingArtifactStore) Publish(
+	_ context.Context,
+	_ string,
+	downloads export.Downloads,
+) (export.Downloads, error) {
+	s.calls = append(s.calls, downloads)
+	if s.fail != nil {
+		return export.Downloads{}, s.fail
+	}
+	if s.published.JSON != "" || s.published.CSV != "" || s.published.XLSX != "" {
+		return s.published, nil
+	}
+	return downloads, nil
+}
 
 func (c *scriptedCollector) Process(_ context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	for _, seed := range pCtx.CollectionSeeds() {
@@ -69,26 +93,45 @@ func (c *scriptedCollector) Process(_ context.Context, pCtx *models.PipelineCont
 	return pCtx, nil
 }
 
-func newTestService(t *testing.T, mode RunMode) (*Service, *MemoryCheckpointStore, *MemoryProjectionStore, RunRecord) {
+func newTestService(
+	t *testing.T,
+	mode RunMode,
+	store *capturingArtifactStore,
+) (*Service, *MemoryCheckpointStore, *MemoryProjectionStore, RunRecord) {
 	t.Helper()
 
 	checkpoints := NewMemoryCheckpointStore()
 	projection := NewMemoryProjectionStore()
+	outputRoot := t.TempDir()
 	now := func() time.Time {
 		return time.Date(2026, time.March, 25, 12, 0, 0, 0, time.UTC)
+	}
+	if store == nil {
+		store = &capturingArtifactStore{}
 	}
 
 	factory := func(runID string) (*app.Pipeline, error) {
 		engine := &dag.Engine{
 			Collectors: []dag.Collector{&scriptedCollector{}},
+			Exporters: []dag.Exporter{
+				export.NewJSONExporter(filepath.Join(outputRoot, runID, "results.json")),
+				export.NewCSVExporter(filepath.Join(outputRoot, runID, "results.csv")),
+				export.NewXLSXExporter(filepath.Join(outputRoot, runID, "results.xlsx")),
+			},
 		}
-		return app.NewPipelineWithEngine(engine, runID, nil, telemetry.Noop()), nil
+		outputs := []string{
+			filepath.Join(outputRoot, runID, "results.json"),
+			filepath.Join(outputRoot, runID, "results.csv"),
+			filepath.Join(outputRoot, runID, "results.xlsx"),
+		}
+		return app.NewPipelineWithEngine(engine, runID, outputs, telemetry.Noop()), nil
 	}
 
 	service, err := NewService(Config{
 		PipelineFactory: factory,
 		Checkpoints:     checkpoints,
 		Projection:      projection,
+		Artifacts:       store,
 		Now:             now,
 	})
 	if err != nil {
@@ -117,7 +160,14 @@ func newTestService(t *testing.T, mode RunMode) (*Service, *MemoryCheckpointStor
 }
 
 func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
-	service, checkpoints, projection, run := newTestService(t, RunModeManual)
+	artifactStore := &capturingArtifactStore{
+		published: export.Downloads{
+			JSON: "runs/run-manual/results.json",
+			CSV:  "runs/run-manual/results.csv",
+			XLSX: "runs/run-manual/results.xlsx",
+		},
+	}
+	service, checkpoints, projection, run := newTestService(t, RunModeManual, artifactStore)
 
 	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
 		t.Fatalf("ProcessRun(manual initial) error = %v", err)
@@ -133,6 +183,9 @@ func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
 	}
 	if snapshot.Run.PendingPivotCount != 1 {
 		t.Fatalf("expected one pending pivot, got %d", snapshot.Run.PendingPivotCount)
+	}
+	if snapshot.Run.Downloads != (export.Downloads{}) {
+		t.Fatalf("expected downloads to stay empty before completion, got %+v", snapshot.Run.Downloads)
 	}
 	if snapshot.Run.JudgeEvaluationCount != 1 || snapshot.Run.JudgeAcceptedCount != 1 || snapshot.Run.JudgeDiscardedCount != 0 {
 		t.Fatalf("expected judge counters to be tracked in the snapshot, got %+v", snapshot.Run)
@@ -168,6 +221,9 @@ func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
 	if snapshot.Run.Status != RunStatusCompleted {
 		t.Fatalf("expected completed status, got %s", snapshot.Run.Status)
 	}
+	if snapshot.Run.Downloads != artifactStore.published {
+		t.Fatalf("expected published downloads in snapshot, got %+v", snapshot.Run.Downloads)
+	}
 	if len(snapshot.Context.Seeds) != 2 {
 		t.Fatalf("expected accepted pivot to be added as a seed, got %d seed(s)", len(snapshot.Context.Seeds))
 	}
@@ -180,10 +236,20 @@ func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
 	if len(projection.Events[run.ID]) == 0 {
 		t.Fatalf("expected mutation events to be projected")
 	}
+	if len(artifactStore.calls) != 1 {
+		t.Fatalf("expected one artifact publish call, got %d", len(artifactStore.calls))
+	}
 }
 
 func TestService_ProcessRun_AutonomousAutoAcceptsPivot(t *testing.T) {
-	service, checkpoints, projection, run := newTestService(t, RunModeAutonomous)
+	artifactStore := &capturingArtifactStore{
+		published: export.Downloads{
+			JSON: "runs/run-auto/results.json",
+			CSV:  "runs/run-auto/results.csv",
+			XLSX: "runs/run-auto/results.xlsx",
+		},
+	}
+	service, checkpoints, projection, run := newTestService(t, RunModeAutonomous, artifactStore)
 
 	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
 		t.Fatalf("ProcessRun(autonomous) error = %v", err)
@@ -199,6 +265,9 @@ func TestService_ProcessRun_AutonomousAutoAcceptsPivot(t *testing.T) {
 	if len(snapshot.Context.Seeds) != 2 {
 		t.Fatalf("expected auto-accepted pivot to add a seed, got %d seed(s)", len(snapshot.Context.Seeds))
 	}
+	if snapshot.Run.Downloads != artifactStore.published {
+		t.Fatalf("expected published downloads, got %+v", snapshot.Run.Downloads)
+	}
 
 	autoAccepted := false
 	for _, pivot := range projection.Pivots[run.ID] {
@@ -212,7 +281,7 @@ func TestService_ProcessRun_AutonomousAutoAcceptsPivot(t *testing.T) {
 }
 
 func TestService_DecidePivotRejectsNonOwner(t *testing.T) {
-	service, _, projection, run := newTestService(t, RunModeManual)
+	service, _, projection, run := newTestService(t, RunModeManual, &capturingArtifactStore{})
 
 	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
 		t.Fatalf("ProcessRun() error = %v", err)
@@ -234,7 +303,7 @@ func TestService_DecidePivotRejectsNonOwner(t *testing.T) {
 }
 
 func TestService_DecidePivotMissingPivot(t *testing.T) {
-	service, _, _, run := newTestService(t, RunModeManual)
+	service, _, _, run := newTestService(t, RunModeManual, &capturingArtifactStore{})
 
 	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
 		t.Fatalf("ProcessRun() error = %v", err)
@@ -251,7 +320,7 @@ func TestService_DecidePivotMissingPivot(t *testing.T) {
 }
 
 func TestService_DecidePivotRejectsNonPendingPivot(t *testing.T) {
-	service, _, projection, run := newTestService(t, RunModeManual)
+	service, _, projection, run := newTestService(t, RunModeManual, &capturingArtifactStore{})
 
 	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
 		t.Fatalf("ProcessRun() error = %v", err)
@@ -280,5 +349,42 @@ func TestService_DecidePivotRejectsNonPendingPivot(t *testing.T) {
 	}
 	if errors.Is(err, ErrForbidden) || errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected bad request error, got %v", err)
+	}
+}
+
+func TestService_ProcessRun_FailsWhenArtifactPublishFails(t *testing.T) {
+	service, checkpoints, projection, run := newTestService(t, RunModeAutonomous, &capturingArtifactStore{
+		fail: errors.New("bucket write failed"),
+	})
+
+	err := service.ProcessRun(context.Background(), run.ID)
+	if err == nil {
+		t.Fatal("expected artifact publish failure to be returned")
+	}
+	if got := err.Error(); got == "" || !strings.Contains(got, "publish artifacts") {
+		t.Fatalf("expected artifact publish error, got %v", err)
+	}
+
+	snapshot, loadErr := checkpoints.Load(context.Background(), run.ID)
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if snapshot.Run.Status != RunStatusFailed {
+		t.Fatalf("expected failed status, got %s", snapshot.Run.Status)
+	}
+	if snapshot.Run.LastError == "" {
+		t.Fatal("expected artifact failure to populate last_error")
+	}
+	if snapshot.Run.Downloads != (export.Downloads{}) {
+		t.Fatalf("expected downloads to stay empty after artifact failure, got %+v", snapshot.Run.Downloads)
+	}
+	foundFailureEvent := false
+	for _, event := range projection.Events[run.ID] {
+		if event.Kind == "artifact_publish_failed" {
+			foundFailureEvent = true
+		}
+	}
+	if !foundFailureEvent {
+		t.Fatal("expected artifact publish failure event to be projected")
 	}
 }

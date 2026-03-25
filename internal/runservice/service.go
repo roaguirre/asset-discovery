@@ -25,6 +25,7 @@ type Config struct {
 	PipelineFactory PipelineFactory
 	Checkpoints     CheckpointStore
 	Projection      ProjectionStore
+	Artifacts       ArtifactStore
 	Dispatcher      Dispatcher
 	Now             func() time.Time
 }
@@ -33,6 +34,7 @@ type Service struct {
 	pipelineFactory PipelineFactory
 	checkpoints     CheckpointStore
 	projection      ProjectionStore
+	artifacts       ArtifactStore
 	dispatcher      Dispatcher
 	now             func() time.Time
 }
@@ -47,6 +49,9 @@ func NewService(cfg Config) (*Service, error) {
 	if cfg.Projection == nil {
 		return nil, errors.New("projection store is required")
 	}
+	if cfg.Artifacts == nil {
+		return nil, errors.New("artifact store is required")
+	}
 
 	nowFn := cfg.Now
 	if nowFn == nil {
@@ -57,6 +62,7 @@ func NewService(cfg Config) (*Service, error) {
 		pipelineFactory: cfg.PipelineFactory,
 		checkpoints:     cfg.Checkpoints,
 		projection:      cfg.Projection,
+		artifacts:       cfg.Artifacts,
 		dispatcher:      cfg.Dispatcher,
 		now:             nowFn,
 	}, nil
@@ -83,8 +89,7 @@ func (s *Service) CreateRun(ctx context.Context, user AuthenticatedUser, request
 	now := s.now()
 	runID := app.BuildRunID(now)
 
-	pipeline, err := s.pipelineFactory(runID)
-	if err != nil {
+	if _, err := s.pipelineFactory(runID); err != nil {
 		return RunRecord{}, fmt.Errorf("build pipeline: %w", err)
 	}
 
@@ -96,7 +101,6 @@ func (s *Service) CreateRun(ctx context.Context, user AuthenticatedUser, request
 		Status:            RunStatusQueued,
 		CurrentWave:       0,
 		SeedCount:         len(seeds),
-		Downloads:         buildDownloads(pipeline.Outputs()),
 		CreatedAt:         now,
 		UpdatedAt:         now,
 		PendingPivotCount: 0,
@@ -292,9 +296,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 	if err != nil {
 		return fmt.Errorf("build pipeline: %w", err)
 	}
-	if snapshot.Run.Downloads == (export.Downloads{}) {
-		snapshot.Run.Downloads = buildDownloads(pipeline.Outputs())
-	}
+	localDownloads := buildDownloads(pipeline.Outputs())
 
 	broker := newPivotBroker(snapshot.Run.Mode, snapshot.Pivots, s.now)
 	listener := newProjectionMutationListener(ctx, snapshot.Run, &snapshot.Context, s.projection, s.now)
@@ -384,7 +386,37 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 		}
 		return err
 	default:
+		publishedDownloads, publishErr := s.artifacts.Publish(ctx, runID, localDownloads)
+		if publishErr != nil {
+			failedAt := s.now()
+			snapshot.Run.Status = RunStatusFailed
+			snapshot.Run.LastError = fmt.Sprintf("publish artifacts: %v", publishErr)
+			snapshot.Run.UpdatedAt = failedAt
+			snapshot.SchedulerState = snapshot.Context.SnapshotSchedulerState()
+			snapshot.Pivots = broker.Snapshot()
+			updateRunCounters(&snapshot)
+			if saveErr := s.checkpoints.Save(ctx, runID, snapshot); saveErr != nil {
+				return fmt.Errorf("save artifact failure snapshot: %v (artifact error: %w)", saveErr, publishErr)
+			}
+			if projectErr := s.projectSnapshot(ctx, &snapshot); projectErr != nil {
+				return fmt.Errorf("project artifact failure: %v (artifact error: %w)", projectErr, publishErr)
+			}
+			if eventErr := s.projection.AppendEvent(ctx, runID, EventRecord{
+				ID:        models.NewID("event"),
+				Kind:      "artifact_publish_failed",
+				Message:   fmt.Sprintf("Run %s failed while publishing result artifacts.", runID),
+				CreatedAt: failedAt,
+				Metadata: map[string]interface{}{
+					"error": publishErr.Error(),
+				},
+			}); eventErr != nil {
+				return fmt.Errorf("project artifact failure event: %v (artifact error: %w)", eventErr, publishErr)
+			}
+			return fmt.Errorf("publish artifacts: %w", publishErr)
+		}
+
 		completedAt := s.now()
+		snapshot.Run.Downloads = publishedDownloads
 		snapshot.Run.Status = RunStatusCompleted
 		snapshot.Run.UpdatedAt = completedAt
 		snapshot.Run.CompletedAt = &completedAt
@@ -400,6 +432,19 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 		}
 		if err := s.projectSnapshot(ctx, &snapshot); err != nil {
 			return err
+		}
+		if err := s.projection.AppendEvent(ctx, runID, EventRecord{
+			ID:        models.NewID("event"),
+			Kind:      "artifacts_published",
+			Message:   fmt.Sprintf("Published result artifacts for run %s.", runID),
+			CreatedAt: completedAt,
+			Metadata: map[string]interface{}{
+				"json": snapshot.Run.Downloads.JSON,
+				"csv":  snapshot.Run.Downloads.CSV,
+				"xlsx": snapshot.Run.Downloads.XLSX,
+			},
+		}); err != nil {
+			return fmt.Errorf("project artifact publish event: %w", err)
 		}
 		return s.projection.AppendEvent(ctx, runID, EventRecord{
 			ID:        models.NewID("event"),
