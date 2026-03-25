@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"asset-discovery/internal/export/visualizer"
 	"asset-discovery/internal/models"
 )
 
@@ -39,7 +38,7 @@ func newProjectionMutationListener(
 
 func (l *projectionMutationListener) OnAssetUpsert(asset models.Asset) {
 	snapshot := l.pCtx.SnapshotReadModel()
-	row, ok := buildProjectedRow(l.run, &snapshot, asset.ID)
+	row, ok := buildProjectedAssetRow(l.run.ID, &snapshot, asset.ID)
 	if !ok {
 		return
 	}
@@ -125,16 +124,6 @@ func (l *projectionMutationListener) setErr(err error) {
 	if l.err == nil {
 		l.err = err
 	}
-}
-
-func buildProjectedRow(run RunRecord, pCtx *models.PipelineContext, assetID string) (visualizer.Row, bool) {
-	projected := visualizer.BuildRun(run.ID, run.CreatedAt, run.Downloads, pCtx)
-	for _, row := range projected.Rows {
-		if row.AssetID == assetID {
-			return row, true
-		}
-	}
-	return visualizer.Row{}, false
 }
 
 func (l *projectionMutationListener) syncRunProjection(snapshot models.PipelineContext) error {

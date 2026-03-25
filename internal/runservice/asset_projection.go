@@ -1,4 +1,4 @@
-package visualizer
+package runservice
 
 import (
 	"fmt"
@@ -11,87 +11,58 @@ import (
 	"asset-discovery/internal/tracing/lineage"
 )
 
-func BuildRun(runID string, createdAt time.Time, downloads Downloads, pCtx *models.PipelineContext) Run {
-	enumByID := make(map[string]models.Enumeration, len(pCtx.Enumerations))
-	for _, enum := range pCtx.Enumerations {
-		enumByID[enum.ID] = enum
-	}
+// EvidenceGroup stores grouped supporting details for a projected asset row.
+type EvidenceGroup struct {
+	Title string   `json:"title"`
+	Items []string `json:"items,omitempty"`
+}
 
-	seedByID := make(map[string]models.Seed, len(pCtx.Seeds))
-	for _, seed := range pCtx.Seeds {
-		seedByID[seed.ID] = seed
-	}
+// AssetRow is the live asset document persisted under runs/{runID}/assets.
+type AssetRow struct {
+	AssetID           string          `json:"asset_id"`
+	Identifier        string          `json:"identifier"`
+	AssetType         string          `json:"asset_type"`
+	DomainKind        string          `json:"domain_kind,omitempty"`
+	RegistrableDomain string          `json:"registrable_domain,omitempty"`
+	ResolutionStatus  string          `json:"resolution_status,omitempty"`
+	OwnershipState    string          `json:"ownership_state,omitempty"`
+	InclusionReason   string          `json:"inclusion_reason,omitempty"`
+	ASN               int             `json:"asn,omitempty"`
+	Organization      string          `json:"organization,omitempty"`
+	PTR               string          `json:"ptr,omitempty"`
+	Source            string          `json:"source"`
+	DiscoveredBy      string          `json:"discovered_by,omitempty"`
+	EnrichedBy        string          `json:"enriched_by,omitempty"`
+	EnumerationID     string          `json:"enumeration_id"`
+	SeedID            string          `json:"seed_id"`
+	Status            string          `json:"status"`
+	DiscoveryDate     time.Time       `json:"discovery_date,omitempty"`
+	Details           string          `json:"details,omitempty"`
+	EvidenceGroups    []EvidenceGroup `json:"evidence_groups,omitempty"`
+	TracePath         string          `json:"trace_path,omitempty"`
+}
 
-	observationsByAssetID := make(map[string][]models.AssetObservation, len(pCtx.Observations))
-	for _, observation := range pCtx.Observations {
-		if observation.AssetID == "" {
-			continue
-		}
-		observationsByAssetID[observation.AssetID] = append(observationsByAssetID[observation.AssetID], observation)
-	}
+type assetProjectionInputs struct {
+	enumByID            map[string]models.Enumeration
+	seedByID            map[string]models.Seed
+	observationsByAsset map[string][]models.AssetObservation
+	relationsByAsset    map[string][]models.AssetRelation
+}
 
-	relationsByAssetID := make(map[string][]models.AssetRelation, len(pCtx.Relations))
-	for _, relation := range pCtx.Relations {
-		if relation.FromAssetID != "" {
-			relationsByAssetID[relation.FromAssetID] = append(relationsByAssetID[relation.FromAssetID], relation)
-		}
-		if relation.ToAssetID != "" && relation.ToAssetID != relation.FromAssetID {
-			relationsByAssetID[relation.ToAssetID] = append(relationsByAssetID[relation.ToAssetID], relation)
-		}
-	}
-
-	rows := make([]Row, 0, len(pCtx.Assets))
+func buildProjectedAssetReadModel(runID string, pCtx *models.PipelineContext) ([]AssetRow, []lineage.Trace) {
+	inputs := buildAssetProjectionInputs(pCtx)
+	rows := make([]AssetRow, 0, len(pCtx.Assets))
 	tracesByAssetID := make(map[string]lineage.Trace, len(pCtx.Assets))
+
 	for _, asset := range exportshared.SortedAssetsForExport(pCtx.Assets) {
-		classified := exportshared.ClassifyAsset(asset)
-		contributors := lineage.BuildTraceContributors(asset, enumByID, seedByID)
-		allSources, discoverySources, enrichmentSources := lineage.SummarizeObservationSources(observationsByAssetID[asset.ID], asset.Source)
-		rowSource := discoverySources
-		if strings.TrimSpace(rowSource) == "" {
-			rowSource = allSources
-		}
-		tracePath := lineage.BuildTracePath(runID, asset.ID)
-		row := Row{
-			AssetID:           asset.ID,
-			Identifier:        asset.Identifier,
-			AssetType:         string(asset.Type),
-			DomainKind:        string(classified.DomainKind),
-			RegistrableDomain: classified.RegistrableDomain,
-			ResolutionStatus:  string(models.DomainResolutionStatusForAsset(asset)),
-			OwnershipState:    string(asset.OwnershipState),
-			InclusionReason:   asset.InclusionReason,
-			Source:            rowSource,
-			DiscoveredBy:      discoverySources,
-			EnrichedBy:        enrichmentSources,
-			EnumerationID:     lineage.SummarizeContributorValues(contributors, func(item lineage.TraceContributor) string { return item.EnumerationID }),
-			SeedID:            lineage.SummarizeContributorValues(contributors, func(item lineage.TraceContributor) string { return item.SeedID }),
-			Status:            lineage.SummarizeTraceStatus(asset, contributors, enumByID),
-			DiscoveryDate:     asset.DiscoveryDate,
-			Details:           buildDetails(asset),
-			EvidenceGroups:    buildEvidenceGroups(asset),
-			TracePath:         tracePath,
-		}
-		if asset.IPDetails != nil {
-			row.ASN = asset.IPDetails.ASN
-			row.Organization = asset.IPDetails.Organization
-			row.PTR = asset.IPDetails.PTR
-		}
+		row, trace := buildProjectedAssetData(runID, asset, inputs)
 		rows = append(rows, row)
-		tracesByAssetID[asset.ID] = lineage.BuildTrace(
-			asset,
-			string(classified.DomainKind),
-			classified.RegistrableDomain,
-			contributors,
-			observationsByAssetID[asset.ID],
-			relationsByAssetID[asset.ID],
-			enumByID,
-			seedByID,
-		)
+		tracesByAssetID[asset.ID] = trace
 	}
 
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rowGroup(rows[i]) != rowGroup(rows[j]) {
-			return rowGroup(rows[i]) < rowGroup(rows[j])
+		if assetRowGroup(rows[i]) != assetRowGroup(rows[j]) {
+			return assetRowGroup(rows[i]) < assetRowGroup(rows[j])
 		}
 		if rows[i].RegistrableDomain != rows[j].RegistrableDomain {
 			return rows[i].RegistrableDomain < rows[j].RegistrableDomain
@@ -112,23 +83,120 @@ func BuildRun(runID string, createdAt time.Time, downloads Downloads, pCtx *mode
 		traces = append(traces, trace)
 	}
 
-	return Run{
-		RunSummary: RunSummary{
-			ID:               runID,
-			Label:            createdAt.Format("2006-01-02 15:04:05 -0700"),
-			CreatedAt:        createdAt,
-			AssetCount:       len(pCtx.Assets),
-			EnumerationCount: len(pCtx.Enumerations),
-			SeedCount:        len(pCtx.Seeds),
-			Downloads:        downloads,
-		},
-		Rows:         rows,
-		Traces:       traces,
-		JudgeSummary: lineage.BuildJudgeSummary(pCtx.JudgeEvaluations),
+	return rows, traces
+}
+
+func buildProjectedAssetRow(runID string, pCtx *models.PipelineContext, assetID string) (AssetRow, bool) {
+	rows, _ := buildProjectedAssetReadModel(runID, pCtx)
+	for _, row := range rows {
+		if row.AssetID == assetID {
+			return row, true
+		}
+	}
+	return AssetRow{}, false
+}
+
+func buildAssetProjectionInputs(pCtx *models.PipelineContext) assetProjectionInputs {
+	enumByID := make(map[string]models.Enumeration, len(pCtx.Enumerations))
+	for _, enumeration := range pCtx.Enumerations {
+		enumByID[enumeration.ID] = enumeration
+	}
+
+	seedByID := make(map[string]models.Seed, len(pCtx.Seeds))
+	for _, seed := range pCtx.Seeds {
+		seedByID[seed.ID] = seed
+	}
+
+	observationsByAsset := make(map[string][]models.AssetObservation, len(pCtx.Observations))
+	for _, observation := range pCtx.Observations {
+		if observation.AssetID == "" {
+			continue
+		}
+		observationsByAsset[observation.AssetID] = append(observationsByAsset[observation.AssetID], observation)
+	}
+
+	relationsByAsset := make(map[string][]models.AssetRelation, len(pCtx.Relations))
+	for _, relation := range pCtx.Relations {
+		if relation.FromAssetID != "" {
+			relationsByAsset[relation.FromAssetID] = append(relationsByAsset[relation.FromAssetID], relation)
+		}
+		if relation.ToAssetID != "" && relation.ToAssetID != relation.FromAssetID {
+			relationsByAsset[relation.ToAssetID] = append(relationsByAsset[relation.ToAssetID], relation)
+		}
+	}
+
+	return assetProjectionInputs{
+		enumByID:            enumByID,
+		seedByID:            seedByID,
+		observationsByAsset: observationsByAsset,
+		relationsByAsset:    relationsByAsset,
 	}
 }
 
-func rowGroup(row Row) int {
+func buildProjectedAssetData(
+	runID string,
+	asset models.Asset,
+	inputs assetProjectionInputs,
+) (AssetRow, lineage.Trace) {
+	classified := exportshared.ClassifyAsset(asset)
+	contributors := lineage.BuildTraceContributors(asset, inputs.enumByID, inputs.seedByID)
+	allSources, discoverySources, enrichmentSources := lineage.SummarizeObservationSources(
+		inputs.observationsByAsset[asset.ID],
+		asset.Source,
+	)
+
+	rowSource := discoverySources
+	if strings.TrimSpace(rowSource) == "" {
+		rowSource = allSources
+	}
+
+	row := AssetRow{
+		AssetID:           asset.ID,
+		Identifier:        asset.Identifier,
+		AssetType:         string(asset.Type),
+		DomainKind:        string(classified.DomainKind),
+		RegistrableDomain: classified.RegistrableDomain,
+		ResolutionStatus:  string(models.DomainResolutionStatusForAsset(asset)),
+		OwnershipState:    string(asset.OwnershipState),
+		InclusionReason:   asset.InclusionReason,
+		Source:            rowSource,
+		DiscoveredBy:      discoverySources,
+		EnrichedBy:        enrichmentSources,
+		EnumerationID: lineage.SummarizeContributorValues(
+			contributors,
+			func(item lineage.TraceContributor) string { return item.EnumerationID },
+		),
+		SeedID: lineage.SummarizeContributorValues(
+			contributors,
+			func(item lineage.TraceContributor) string { return item.SeedID },
+		),
+		Status:         lineage.SummarizeTraceStatus(asset, contributors, inputs.enumByID),
+		DiscoveryDate:  asset.DiscoveryDate,
+		Details:        buildProjectedAssetDetails(asset),
+		EvidenceGroups: buildProjectedEvidenceGroups(asset),
+		TracePath:      lineage.BuildTracePath(runID, asset.ID),
+	}
+	if asset.IPDetails != nil {
+		row.ASN = asset.IPDetails.ASN
+		row.Organization = asset.IPDetails.Organization
+		row.PTR = asset.IPDetails.PTR
+	}
+
+	trace := lineage.BuildTrace(
+		asset,
+		string(classified.DomainKind),
+		classified.RegistrableDomain,
+		contributors,
+		inputs.observationsByAsset[asset.ID],
+		inputs.relationsByAsset[asset.ID],
+		inputs.enumByID,
+		inputs.seedByID,
+	)
+
+	return row, trace
+}
+
+func assetRowGroup(row AssetRow) int {
 	const (
 		groupRegistrableDomain = iota
 		groupSubdomain
@@ -147,7 +215,7 @@ func rowGroup(row Row) int {
 	return groupIP
 }
 
-func buildDetails(asset models.Asset) string {
+func buildProjectedAssetDetails(asset models.Asset) string {
 	parts := make([]string, 0, 16)
 
 	if asset.OwnershipState != "" {
@@ -174,7 +242,7 @@ func buildDetails(asset models.Asset) string {
 		}
 
 		if asset.DomainDetails.RDAP != nil {
-			appendRDAPDetails(&parts, asset.DomainDetails.RDAP)
+			appendProjectedRDAPDetails(&parts, asset.DomainDetails.RDAP)
 		}
 	}
 
@@ -199,7 +267,7 @@ func buildDetails(asset models.Asset) string {
 	return strings.Join(parts, " | ")
 }
 
-func appendRDAPDetails(parts *[]string, rdap *models.RDAPData) {
+func appendProjectedRDAPDetails(parts *[]string, rdap *models.RDAPData) {
 	if rdap == nil {
 		return
 	}
@@ -235,7 +303,7 @@ func appendRDAPDetails(parts *[]string, rdap *models.RDAPData) {
 	}
 }
 
-func buildEvidenceGroups(asset models.Asset) []EvidenceGroup {
+func buildProjectedEvidenceGroups(asset models.Asset) []EvidenceGroup {
 	groups := make([]EvidenceGroup, 0, 4)
 
 	if asset.Type == models.AssetTypeDomain {
@@ -265,7 +333,7 @@ func buildEvidenceGroups(asset models.Asset) []EvidenceGroup {
 		}
 
 		if asset.DomainDetails != nil {
-			if registrationItems := buildRegistrationItems(asset.DomainDetails.RDAP); len(registrationItems) > 0 {
+			if registrationItems := buildProjectedRegistrationItems(asset.DomainDetails.RDAP); len(registrationItems) > 0 {
 				groups = append(groups, EvidenceGroup{
 					Title: "Registration",
 					Items: registrationItems,
@@ -303,7 +371,7 @@ func buildEvidenceGroups(asset models.Asset) []EvidenceGroup {
 	return groups
 }
 
-func buildRegistrationItems(rdap *models.RDAPData) []string {
+func buildProjectedRegistrationItems(rdap *models.RDAPData) []string {
 	if rdap == nil {
 		return nil
 	}
@@ -339,11 +407,11 @@ func buildRegistrationItems(rdap *models.RDAPData) []string {
 	return items
 }
 
-func buildTraceLinks(runID string, row Row, rows []Row) []lineage.TraceLink {
+func buildTraceLinks(runID string, row AssetRow, rows []AssetRow) []lineage.TraceLink {
 	links := make([]lineage.TraceLink, 0, 8)
 	seen := map[string]struct{}{row.AssetID: {}}
 
-	appendMatch := func(candidate Row, label, description string) {
+	appendMatch := func(candidate AssetRow, label, description string) {
 		if _, exists := seen[candidate.AssetID]; exists {
 			return
 		}

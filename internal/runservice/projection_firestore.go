@@ -1,6 +1,7 @@
 package runservice
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"cloud.google.com/go/firestore"
 	"google.golang.org/api/iterator"
 
-	"asset-discovery/internal/export/visualizer"
 	"asset-discovery/internal/tracing/lineage"
 )
 
@@ -55,7 +55,7 @@ func (s *FirestoreProjectionStore) AppendEvent(ctx context.Context, runID string
 	return err
 }
 
-func (s *FirestoreProjectionStore) UpsertAsset(ctx context.Context, runID string, row visualizer.Row) error {
+func (s *FirestoreProjectionStore) UpsertAsset(ctx context.Context, runID string, row AssetRow) error {
 	payload, err := firestoreJSONDocument(row)
 	if err != nil {
 		return fmt.Errorf("marshal asset row: %w", err)
@@ -115,11 +115,47 @@ func firestoreJSONDocument(value interface{}) (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	var payload map[string]interface{}
-	if err := json.Unmarshal(body, &payload); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+
+	var payload interface{}
+	if err := decoder.Decode(&payload); err != nil {
 		return nil, err
 	}
-	return payload, nil
+
+	document, ok := normalizeFirestoreJSONValue(payload).(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("expected JSON object document, got %T", payload)
+	}
+
+	return document, nil
+}
+
+func normalizeFirestoreJSONValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		normalized := make(map[string]interface{}, len(typed))
+		for key, item := range typed {
+			normalized[key] = normalizeFirestoreJSONValue(item)
+		}
+		return normalized
+	case []interface{}:
+		normalized := make([]interface{}, len(typed))
+		for index, item := range typed {
+			normalized[index] = normalizeFirestoreJSONValue(item)
+		}
+		return normalized
+	case json.Number:
+		if integer, err := typed.Int64(); err == nil {
+			return integer
+		}
+		if decimal, err := typed.Float64(); err == nil {
+			return decimal
+		}
+		return typed.String()
+	default:
+		return value
+	}
 }
 
 type firestoreMutation struct {

@@ -85,7 +85,7 @@ func init() {
 	defaultVariantSweep := collect.DefaultDNSVariantSweepConfig()
 
 	rootCmd.Flags().StringVarP(&seedsFile, "seeds", "s", "", "Path to seeds JSON file")
-	rootCmd.Flags().StringSliceVarP(&outputs, "outputs", "o", nil, "Comma separated list of output paths. Use file paths for JSON/CSV/XLSX and visualizer:<dir> for the client visualizer data archive. If omitted, timestamped JSON/CSV/XLSX exports are written under exports/runs/<run-id>/ and a visualizer archive is written to visualizer:exports/visualizer.")
+	rootCmd.Flags().StringSliceVarP(&outputs, "outputs", "o", nil, "Comma separated list of output paths. Use file paths for JSON, CSV, and XLSX outputs only. If omitted, timestamped exports are written under exports/runs/<run-id>/.")
 	rootCmd.Flags().StringVar(&dnsVariantSweepMode, "dns-variant-sweep-mode", string(defaultVariantSweep.Mode), "DNS variant sweep mode: exhaustive or prioritized")
 	rootCmd.Flags().IntVar(&dnsVariantBatchSize, "dns-variant-batch-size", defaultVariantSweep.BatchSize, "Maximum number of DNS variant roots to process per batch")
 	rootCmd.Flags().IntVar(&dnsVariantConcurrency, "dns-variant-concurrency", defaultVariantSweep.Concurrency, "Maximum number of concurrent DNS variant probes")

@@ -8,7 +8,7 @@ This project implements a Directed Acyclic Graph (DAG) for processing asset disc
 1. **Collection**: Gathering raw data from OSINT sources and APIs and emitting raw observations plus discovery relations.
 2. **Enrichment**: Augmenting canonical domain and IP assets with DNS, RDAP, PTR, ASN, organization, and provider data.
 3. **Filtering / Validation**: Validating the canonical runtime graph and applying downstream scope policy.
-4. **Exporting**: Formatting the canonical asset set plus its provenance graph for JSON, CSV, XLSX, and the visualizer.
+4. **Exporting**: Formatting the canonical asset set plus its provenance graph for JSON, CSV, and XLSX.
 
 Runtime state now uses a hybrid model instead of one overloaded asset stream:
 
@@ -26,18 +26,18 @@ Once the normal collection/enrichment frontier is exhausted, the engine now also
 
 This repository now supports two entrypoints:
 
-- the local CLI for deterministic regression testing and archived exports
+- the local CLI for deterministic regression testing and file exports
 - an HTTP server for Firebase-backed live runs, Google sign-in, and human-in-the-loop pivot review
 
 ```bash
 # Build the project
 go build -o discover cmd/discover/main.go
 
-# Run the discovery pipeline with archived default outputs
+# Run the discovery pipeline with default JSON, CSV, and XLSX outputs
 ./discover --seeds path/to/seeds.json
 
-# Or choose explicit output files plus a visualizer archive directory
-./discover --seeds path/to/seeds.json --outputs results.json,results.csv,visualizer:exports/visualizer
+# Or choose explicit output files
+./discover --seeds path/to/seeds.json --outputs results.json,results.csv,results.xlsx
 ```
 
 ### Live Server
@@ -117,53 +117,32 @@ That target starts the Firestore emulator using the sibling `asset-discovery-web
 
 `make test-firebase` uses the Firestore emulator port from the sibling Firebase config. If you are already running another service on that port, stop it first or run the emulator test with a temporary alternate config.
 
-When `--outputs` is omitted, each run is archived under `exports/runs/<run-id>/` and a visualizer data archive is written under [`exports/visualizer/`](exports/visualizer). That archive contains `manifest.json` plus per-run snapshots under `runs/<run-id>.json`.
+When `--outputs` is omitted, each run writes `results.json`, `results.csv`, and `results.xlsx` under `exports/runs/<run-id>/`.
 
-Exports separate registrable domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `registrable_domain` metadata, CSV includes `Domain Kind` and `Registrable Domain` columns, XLSX uses dedicated `Registrable Domains` and `Subdomains` sheets, and the visualizer exposes the same split as sortable/filterable columns.
+Exports separate registrable domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `registrable_domain` metadata, CSV includes `Domain Kind` and `Registrable Domain` columns, and XLSX uses dedicated `Registrable Domains` and `Subdomains` sheets.
 
 Canonical assets also carry:
 
 - `ownership_state`: `owned`, `associated_infrastructure`, or `uncertain`
 - `inclusion_reason`: a short explanation of why the asset is present in the final dataset
 
-The visualizer uses those fields directly in the browse tables and trace view so questionable infrastructure can be shown and explained instead of silently merged into "owned" assets.
+The live workspace uses those fields directly in the asset table and trace explorer so questionable infrastructure can be shown and explained instead of silently merged into "owned" assets.
 
-## Visualizer
+## Live Web Client
 
-The visualizer is now split into two pieces:
+The separate `asset-discovery-web` repository is now the only supported browser client.
 
-- Go exports data only: `manifest.json` plus archived run JSON under `exports/visualizer/` or any `visualizer:<dir>` target.
-- The browser client lives in the separate `asset-discovery-web` repository and loads that data in the browser.
+The Go server projects the live read model directly into Firestore:
 
-This repository now owns the visualizer data contract instead of the browser implementation. The checked-in contract artifacts live under `contracts/visualizer/`:
+- `runs`
+- `runs/{runId}/assets`
+- `runs/{runId}/traces`
+- `runs/{runId}/analysis/judge_summary`
+- `runs/{runId}/pivots`
+- `runs/{runId}/seeds`
+- `runs/{runId}/events`
 
-- `manifest.v1.schema.json`
-- `run.v1.schema.json`
-- `manifest.v1.fixture.json`
-- `run.v1.fixture.json`
-
-The external client keeps the existing runtime behavior:
-
-- default manifest URL `/exports/visualizer/manifest.json`
-- `?manifest=<url-to-manifest.json>` override
-- hash routes such as `#trace/<run-id>/<asset-id>`
-
-Breaking payload changes should introduce a new contract major version rather than silently replacing the v1 schema files.
-
-The client has two main modes:
-
-- **Browse views** for domains and IPs with compact inline summaries and an `Open Trace` action.
-- **Trace workspace** at `#trace/<run-id>/<asset-id>` with a left trace tree and a right detail panel.
-
-Each trace is rooted at the canonical asset and can include:
-
-- contributing observations
-- seed and enumeration context
-- discovery relations between assets
-- enrichment-state snapshots
-- related assets in the same run
-
-This is meant to answer "why is this asset here?" without dumping every merged detail inline in the main results table.
+Those documents back the live `Assets`, `Trace`, `Pivots`, and `Activity` views without relying on archived manifest/run snapshots.
 
 ### Optional LLM Judging For Ownership Decisions
 

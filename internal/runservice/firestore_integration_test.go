@@ -12,7 +12,6 @@ import (
 
 	"asset-discovery/internal/app"
 	"asset-discovery/internal/dag"
-	"asset-discovery/internal/export/visualizer"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/tracing/lineage"
 	"asset-discovery/internal/tracing/telemetry"
@@ -90,7 +89,7 @@ func TestFirestoreProjectionStore_EmulatorRoundTrip(t *testing.T) {
 		Message:   "Asset projected.",
 		CreatedAt: now,
 	}
-	row := visualizer.Row{
+	row := AssetRow{
 		AssetID:       "asset-1",
 		Identifier:    "example.com",
 		AssetType:     "domain",

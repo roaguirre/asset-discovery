@@ -15,7 +15,7 @@ import (
 	"asset-discovery/internal/app"
 	"asset-discovery/internal/dag"
 	"asset-discovery/internal/discovery"
-	"asset-discovery/internal/export/visualizer"
+	export "asset-discovery/internal/export"
 	"asset-discovery/internal/models"
 )
 
@@ -292,7 +292,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 	if err != nil {
 		return fmt.Errorf("build pipeline: %w", err)
 	}
-	if snapshot.Run.Downloads == (visualizer.Downloads{}) {
+	if snapshot.Run.Downloads == (export.Downloads{}) {
 		snapshot.Run.Downloads = buildDownloads(pipeline.Outputs())
 	}
 
@@ -411,7 +411,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 }
 
 func (s *Service) projectSnapshot(ctx context.Context, snapshot *Snapshot) error {
-	projectedRun := visualizer.BuildRun(snapshot.Run.ID, snapshot.Run.CreatedAt, snapshot.Run.Downloads, &snapshot.Context)
+	rows, traces := buildProjectedAssetReadModel(snapshot.Run.ID, &snapshot.Context)
 	judgeSummary := buildProjectedJudgeSummary(&snapshot.Context)
 	applyProjectedRunMetrics(&snapshot.Run, &snapshot.Context, countPendingPivots(snapshot.Pivots), judgeSummary)
 
@@ -421,12 +421,12 @@ func (s *Service) projectSnapshot(ctx context.Context, snapshot *Snapshot) error
 	if err := s.projection.UpsertJudgeSummary(ctx, snapshot.Run.ID, judgeSummary); err != nil {
 		return fmt.Errorf("upsert judge summary: %w", err)
 	}
-	for _, row := range projectedRun.Rows {
+	for _, row := range rows {
 		if err := s.projection.UpsertAsset(ctx, snapshot.Run.ID, row); err != nil {
 			return fmt.Errorf("upsert asset %s: %w", row.AssetID, err)
 		}
 	}
-	if err := s.projection.SyncTraces(ctx, snapshot.Run.ID, projectedRun.Traces); err != nil {
+	if err := s.projection.SyncTraces(ctx, snapshot.Run.ID, traces); err != nil {
 		return fmt.Errorf("sync traces: %w", err)
 	}
 	for _, pivot := range sortedPivotStates(snapshot.Pivots) {
@@ -451,8 +451,8 @@ func normalizeSeeds(seeds []models.Seed) []models.Seed {
 	return out
 }
 
-func buildDownloads(outputs []string) visualizer.Downloads {
-	downloads := visualizer.Downloads{}
+func buildDownloads(outputs []string) export.Downloads {
+	downloads := export.Downloads{}
 	for _, output := range outputs {
 		switch {
 		case strings.HasSuffix(strings.ToLower(output), ".json"):

@@ -48,7 +48,7 @@ type JudgeCandidateOutcome struct {
 }
 
 // JudgeEvaluation stores one judge request and all candidate outcomes so the
-// visualizer can explain what was accepted and what was discarded for a run.
+// live read model can explain what was accepted and what was discarded for a run.
 type JudgeEvaluation struct {
 	Collector   string                  `json:"collector"`
 	SeedID      string                  `json:"seed_id,omitempty"`

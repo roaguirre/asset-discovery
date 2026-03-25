@@ -3,7 +3,6 @@ package runservice
 import (
 	"context"
 
-	"asset-discovery/internal/export/visualizer"
 	"asset-discovery/internal/tracing/lineage"
 )
 
@@ -19,7 +18,7 @@ type ProjectionStore interface {
 	UpsertPivot(ctx context.Context, runID string, pivot PivotRecord) error
 	UpsertJudgeSummary(ctx context.Context, runID string, summary lineage.JudgeSummary) error
 	AppendEvent(ctx context.Context, runID string, event EventRecord) error
-	UpsertAsset(ctx context.Context, runID string, row visualizer.Row) error
+	UpsertAsset(ctx context.Context, runID string, row AssetRow) error
 	SyncTraces(ctx context.Context, runID string, traces []lineage.Trace) error
 }
 

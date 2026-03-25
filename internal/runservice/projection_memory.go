@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"asset-discovery/internal/export/visualizer"
 	"asset-discovery/internal/tracing/lineage"
 )
 
@@ -15,7 +14,7 @@ type MemoryProjectionStore struct {
 	Pivots         map[string]map[string]PivotRecord
 	JudgeSummaries map[string]lineage.JudgeSummary
 	Events         map[string][]EventRecord
-	Assets         map[string]map[string]visualizer.Row
+	Assets         map[string]map[string]AssetRow
 	Traces         map[string]map[string]lineage.Trace
 }
 
@@ -26,7 +25,7 @@ func NewMemoryProjectionStore() *MemoryProjectionStore {
 		Pivots:         make(map[string]map[string]PivotRecord),
 		JudgeSummaries: make(map[string]lineage.JudgeSummary),
 		Events:         make(map[string][]EventRecord),
-		Assets:         make(map[string]map[string]visualizer.Row),
+		Assets:         make(map[string]map[string]AssetRow),
 		Traces:         make(map[string]map[string]lineage.Trace),
 	}
 }
@@ -81,12 +80,12 @@ func (s *MemoryProjectionStore) AppendEvent(_ context.Context, runID string, eve
 	return nil
 }
 
-func (s *MemoryProjectionStore) UpsertAsset(_ context.Context, runID string, row visualizer.Row) error {
+func (s *MemoryProjectionStore) UpsertAsset(_ context.Context, runID string, row AssetRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.Assets[runID] == nil {
-		s.Assets[runID] = make(map[string]visualizer.Row)
+		s.Assets[runID] = make(map[string]AssetRow)
 	}
 	s.Assets[runID][row.AssetID] = row
 	return nil

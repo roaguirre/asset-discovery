@@ -233,7 +233,7 @@ func TestCrawlerCollector_DoesNotSurfaceUnapprovedOutboundRoot(t *testing.T) {
 		t.Fatalf("expected in-scope subdomain to be added, got %+v", pCtx.Assets)
 	}
 	if assetExists(pCtx.Assets, "example.net") {
-		t.Fatalf("expected unapproved outbound root to stay out of visualizer assets, got %+v", pCtx.Assets)
+		t.Fatalf("expected unapproved outbound root to stay out of projected assets, got %+v", pCtx.Assets)
 	}
 	if seedExists(pCtx.Seeds, "example.net") {
 		t.Fatalf("expected unapproved outbound root to stay out of seeds, got %+v", pCtx.Seeds)

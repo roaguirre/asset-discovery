@@ -10,7 +10,7 @@ import (
 	"asset-discovery/internal/models"
 )
 
-type visualizerJudgeGroupAggregate struct {
+type judgeGroupAggregate struct {
 	collector   string
 	seedID      string
 	seedLabel   string
@@ -32,7 +32,7 @@ func BuildJudgeSummary(evaluations []models.JudgeEvaluation) *JudgeSummary {
 		return nil
 	}
 
-	groupsByKey := make(map[string]*visualizerJudgeGroupAggregate)
+	groupsByKey := make(map[string]*judgeGroupAggregate)
 	evaluationCount := 0
 
 	for _, evaluation := range evaluations {
@@ -51,7 +51,7 @@ func BuildJudgeSummary(evaluations []models.JudgeEvaluation) *JudgeSummary {
 
 		group, exists := groupsByKey[key]
 		if !exists {
-			group = &visualizerJudgeGroupAggregate{
+			group = &judgeGroupAggregate{
 				collector:   evaluation.Collector,
 				seedID:      evaluation.SeedID,
 				seedLabel:   evaluation.SeedLabel,

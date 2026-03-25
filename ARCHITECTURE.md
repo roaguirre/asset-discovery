@@ -184,7 +184,7 @@ Primary deduplication now happens during canonical upsert, not in a large end-of
 
 ## Exported Trace Model
 
-The visualizer trace is also structured now. Exported lineage keeps the legacy flat sections for compatibility, but the UI renders from a tree:
+The live trace model is structured as a tree while still carrying flat sections for summary rendering:
 
 ```go
 type TraceNode struct {

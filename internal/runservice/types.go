@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"asset-discovery/internal/dag"
-	"asset-discovery/internal/export/visualizer"
+	export "asset-discovery/internal/export"
 	"asset-discovery/internal/models"
 )
 
@@ -55,25 +55,25 @@ type CreateRunRequest struct {
 }
 
 type RunRecord struct {
-	ID                   string               `json:"id" firestore:"id"`
-	OwnerUID             string               `json:"owner_uid" firestore:"owner_uid"`
-	OwnerEmail           string               `json:"owner_email" firestore:"owner_email"`
-	Mode                 RunMode              `json:"mode" firestore:"mode"`
-	Status               RunStatus            `json:"status" firestore:"status"`
-	CurrentWave          int                  `json:"current_wave" firestore:"current_wave"`
-	SeedCount            int                  `json:"seed_count" firestore:"seed_count"`
-	EnumerationCount     int                  `json:"enumeration_count" firestore:"enumeration_count"`
-	AssetCount           int                  `json:"asset_count" firestore:"asset_count"`
-	PendingPivotCount    int                  `json:"pending_pivot_count" firestore:"pending_pivot_count"`
-	JudgeEvaluationCount int                  `json:"judge_evaluation_count" firestore:"judge_evaluation_count"`
-	JudgeAcceptedCount   int                  `json:"judge_accepted_count" firestore:"judge_accepted_count"`
-	JudgeDiscardedCount  int                  `json:"judge_discarded_count" firestore:"judge_discarded_count"`
-	LastError            string               `json:"last_error,omitempty" firestore:"last_error,omitempty"`
-	Downloads            visualizer.Downloads `json:"downloads,omitempty" firestore:"downloads,omitempty"`
-	CreatedAt            time.Time            `json:"created_at" firestore:"created_at"`
-	UpdatedAt            time.Time            `json:"updated_at" firestore:"updated_at"`
-	StartedAt            *time.Time           `json:"started_at,omitempty" firestore:"started_at,omitempty"`
-	CompletedAt          *time.Time           `json:"completed_at,omitempty" firestore:"completed_at,omitempty"`
+	ID                   string           `json:"id" firestore:"id"`
+	OwnerUID             string           `json:"owner_uid" firestore:"owner_uid"`
+	OwnerEmail           string           `json:"owner_email" firestore:"owner_email"`
+	Mode                 RunMode          `json:"mode" firestore:"mode"`
+	Status               RunStatus        `json:"status" firestore:"status"`
+	CurrentWave          int              `json:"current_wave" firestore:"current_wave"`
+	SeedCount            int              `json:"seed_count" firestore:"seed_count"`
+	EnumerationCount     int              `json:"enumeration_count" firestore:"enumeration_count"`
+	AssetCount           int              `json:"asset_count" firestore:"asset_count"`
+	PendingPivotCount    int              `json:"pending_pivot_count" firestore:"pending_pivot_count"`
+	JudgeEvaluationCount int              `json:"judge_evaluation_count" firestore:"judge_evaluation_count"`
+	JudgeAcceptedCount   int              `json:"judge_accepted_count" firestore:"judge_accepted_count"`
+	JudgeDiscardedCount  int              `json:"judge_discarded_count" firestore:"judge_discarded_count"`
+	LastError            string           `json:"last_error,omitempty" firestore:"last_error,omitempty"`
+	Downloads            export.Downloads `json:"downloads,omitempty" firestore:"downloads,omitempty"`
+	CreatedAt            time.Time        `json:"created_at" firestore:"created_at"`
+	UpdatedAt            time.Time        `json:"updated_at" firestore:"updated_at"`
+	StartedAt            *time.Time       `json:"started_at,omitempty" firestore:"started_at,omitempty"`
+	CompletedAt          *time.Time       `json:"completed_at,omitempty" firestore:"completed_at,omitempty"`
 }
 
 type SeedRecord struct {

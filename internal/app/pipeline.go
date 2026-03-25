@@ -22,9 +22,7 @@ import (
 )
 
 const (
-	VisualizerOutputPrefix     = "visualizer:"
-	DefaultVisualizerOutput    = VisualizerOutputPrefix + DefaultVisualizerOutputDir
-	DefaultVisualizerOutputDir = "exports/visualizer"
+	legacyVisualizerOutputPrefix = "visualizer:"
 )
 
 type Config struct {
@@ -212,7 +210,6 @@ func ResolveOutputTargets(requested []string, outputsChanged bool, now time.Time
 		filepath.Join(baseDir, "results.json"),
 		filepath.Join(baseDir, "results.csv"),
 		filepath.Join(baseDir, "results.xlsx"),
-		DefaultVisualizerOutput,
 	}, runID
 }
 
@@ -220,80 +217,43 @@ func BuildRunID(now time.Time) string {
 	return now.Format("20060102T150405.000000000-0700")
 }
 
-func BuildExporters(outputTargets []string, runID string) ([]dag.Exporter, error) {
+func BuildExporters(outputTargets []string, _ string) ([]dag.Exporter, error) {
 	var exporters []dag.Exporter
-	var visualizerTargets []string
-
-	rawDownloads := export.Downloads{}
 
 	for _, out := range outputTargets {
-		if dir, isVisualizer, err := ParseVisualizerOutputTarget(out); err != nil {
+		if err := validateOutputTarget(out); err != nil {
 			return nil, err
-		} else if isVisualizer {
-			visualizerTargets = append(visualizerTargets, dir)
-			continue
 		}
 
 		switch strings.ToLower(filepath.Ext(out)) {
 		case ".json":
 			exporters = append(exporters, export.NewJSONExporter(out))
-			rawDownloads.JSON = out
 		case ".csv":
 			exporters = append(exporters, export.NewCSVExporter(out))
-			rawDownloads.CSV = out
 		case ".xlsx":
 			exporters = append(exporters, export.NewXLSXExporter(out))
-			rawDownloads.XLSX = out
 		default:
 			log.Printf("Warning: unsupported output format for %s, skipping.", out)
 		}
 	}
-
-	for _, out := range visualizerTargets {
-		exporters = append(exporters, export.NewVisualizerExporter(out, runID, RelativeDownloads(out, rawDownloads)))
-	}
-
 	return exporters, nil
 }
 
-func ParseVisualizerOutputTarget(target string) (string, bool, error) {
+func validateOutputTarget(target string) error {
 	trimmed := strings.TrimSpace(target)
-	if strings.HasPrefix(trimmed, VisualizerOutputPrefix) {
-		dir := strings.TrimSpace(strings.TrimPrefix(trimmed, VisualizerOutputPrefix))
-		if dir == "" {
-			return "", true, fmt.Errorf("visualizer output %q must include a directory path after %q", target, VisualizerOutputPrefix)
-		}
-		return dir, true, nil
+	if strings.HasPrefix(trimmed, legacyVisualizerOutputPrefix) {
+		return fmt.Errorf(
+			"visualizer output %q is no longer supported; specify JSON, CSV, or XLSX file paths only",
+			target,
+		)
 	}
 
 	if strings.EqualFold(filepath.Ext(trimmed), ".html") {
-		base := strings.TrimSuffix(trimmed, filepath.Ext(trimmed))
-		if strings.TrimSpace(base) == "" {
-			base = DefaultVisualizerOutputDir
-		}
-		return "", false, fmt.Errorf("visualizer HTML output %q is no longer supported; use %q instead", target, VisualizerOutputPrefix+base)
+		return fmt.Errorf(
+			"visualizer HTML output %q is no longer supported; specify JSON, CSV, or XLSX file paths only",
+			target,
+		)
 	}
 
-	return "", false, nil
-}
-
-func RelativeDownloads(visualizerDir string, downloads export.Downloads) export.Downloads {
-	return export.Downloads{
-		JSON: RelativeOutputPath(visualizerDir, downloads.JSON),
-		CSV:  RelativeOutputPath(visualizerDir, downloads.CSV),
-		XLSX: RelativeOutputPath(visualizerDir, downloads.XLSX),
-	}
-}
-
-func RelativeOutputPath(fromDir, toFile string) string {
-	if toFile == "" {
-		return ""
-	}
-
-	rel, err := filepath.Rel(fromDir, toFile)
-	if err != nil {
-		return filepath.ToSlash(toFile)
-	}
-
-	return filepath.ToSlash(rel)
+	return nil
 }

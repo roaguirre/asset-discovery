@@ -1,4 +1,4 @@
-.PHONY: validate build test contract-test test-e2e test-firebase server generate
+.PHONY: validate build test test-e2e test-firebase server generate
 
 build:
 	go build -o discover cmd/discover/main.go
@@ -18,14 +18,10 @@ server:
 	set +a; \
 	go run ./cmd/server
 
-contract-test:
-	go test -v ./internal/export/visualizer -run 'TestContract'
-
 test-e2e: build
 	# Manual integration check; keep this out of the default validate/CI path.
-	# Default outputs now archive each run under exports/runs/<run-id>/ and write visualizer data under exports/visualizer/.
 	./discover --seeds test.json
 
-validate: build test contract-test
+validate: build test
 	go vet ./...
 	go fmt ./...

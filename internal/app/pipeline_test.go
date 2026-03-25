@@ -11,7 +11,7 @@ import (
 	"asset-discovery/internal/tracing/telemetry"
 )
 
-func TestResolveOutputTargets_DefaultsArchiveRuns(t *testing.T) {
+func TestResolveOutputTargets_DefaultsToFileExports(t *testing.T) {
 	now := time.Date(2026, time.March, 17, 22, 45, 6, 123456789, time.FixedZone("-0300", -3*60*60))
 
 	outputs, runID := ResolveOutputTargets(nil, false, now)
@@ -21,7 +21,6 @@ func TestResolveOutputTargets_DefaultsArchiveRuns(t *testing.T) {
 		filepath.Join("exports", "runs", expectedRunID, "results.json"),
 		filepath.Join("exports", "runs", expectedRunID, "results.csv"),
 		filepath.Join("exports", "runs", expectedRunID, "results.xlsx"),
-		DefaultVisualizerOutput,
 	}
 
 	if runID != expectedRunID {
@@ -34,7 +33,7 @@ func TestResolveOutputTargets_DefaultsArchiveRuns(t *testing.T) {
 }
 
 func TestResolveOutputTargets_UsesExplicitOutputs(t *testing.T) {
-	requested := []string{"custom/results.json", "visualizer:custom/visualizer"}
+	requested := []string{"custom/results.json", "custom/results.csv", "custom/results.xlsx"}
 
 	outputs, _ := ResolveOutputTargets(requested, true, time.Now())
 
@@ -43,19 +42,10 @@ func TestResolveOutputTargets_UsesExplicitOutputs(t *testing.T) {
 	}
 }
 
-func TestRelativeOutputPath(t *testing.T) {
-	got := RelativeOutputPath("exports/visualizer", "exports/runs/20260317/results.json")
-	want := "../runs/20260317/results.json"
-
-	if got != want {
-		t.Fatalf("expected %q, got %q", want, got)
-	}
-}
-
 func TestNewPipeline_AssemblesRuntimeAndStages(t *testing.T) {
 	pipeline, err := NewPipeline(Config{
 		OutputsChanged: true,
-		Outputs:        []string{"custom/results.json", "custom/results.csv", "visualizer:custom/visualizer"},
+		Outputs:        []string{"custom/results.json", "custom/results.csv", "custom/results.xlsx"},
 		RunID:          "run-123",
 		Telemetry:      telemetry.Noop(),
 		Now: func() time.Time {
@@ -129,13 +119,13 @@ func TestNewPipeline_AppliesDNSVariantSweepOverrides(t *testing.T) {
 	}
 }
 
-func TestParseVisualizerOutputTarget(t *testing.T) {
-	dir, ok, err := ParseVisualizerOutputTarget("visualizer:custom/visualizer")
-	if err != nil {
-		t.Fatalf("expected visualizer target to parse, got %v", err)
+func TestBuildExporters_RejectsLegacyVisualizerArchiveTargets(t *testing.T) {
+	_, err := BuildExporters([]string{"results.json", "visualizer:custom/visualizer"}, "run-123")
+	if err == nil {
+		t.Fatalf("expected legacy visualizer target to fail")
 	}
-	if !ok || dir != "custom/visualizer" {
-		t.Fatalf("expected parsed visualizer dir, got ok=%v dir=%q", ok, dir)
+	if !strings.Contains(err.Error(), "JSON, CSV, or XLSX") {
+		t.Fatalf("expected replacement guidance in error, got %v", err)
 	}
 }
 
@@ -144,7 +134,7 @@ func TestBuildExporters_RejectsLegacyHTMLVisualizerTargets(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected legacy HTML visualizer target to fail")
 	}
-	if !strings.Contains(err.Error(), "visualizer:custom/visualizer") {
-		t.Fatalf("expected migration hint in error, got %v", err)
+	if !strings.Contains(err.Error(), "JSON, CSV, or XLSX") {
+		t.Fatalf("expected replacement guidance in error, got %v", err)
 	}
 }

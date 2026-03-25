@@ -2,9 +2,15 @@ package export
 
 import (
 	exportshared "asset-discovery/internal/export/shared"
-	"asset-discovery/internal/export/visualizer"
 	"asset-discovery/internal/models"
 )
+
+// Downloads lists the file artifacts emitted for a completed run.
+type Downloads struct {
+	JSON string `json:"json,omitempty"`
+	CSV  string `json:"csv,omitempty"`
+	XLSX string `json:"xlsx,omitempty"`
+}
 
 type DomainKind = exportshared.DomainKind
 
@@ -19,10 +25,4 @@ type ExportAsset struct {
 	RegistrableDomain string     `json:"registrable_domain,omitempty"`
 }
 
-type Downloads = visualizer.Downloads
-type EvidenceGroup = visualizer.EvidenceGroup
-type RunSummary = visualizer.RunSummary
-type Manifest = visualizer.Manifest
-type Row = visualizer.Row
-type Run = visualizer.Run
 type ClassifiedAsset = exportshared.ClassifiedAsset
