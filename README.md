@@ -24,7 +24,10 @@ Once the normal collection/enrichment frontier is exhausted, the engine now also
 
 ## Usage
 
-Currently, the entrypoint is a local CLI.
+This repository now supports two entrypoints:
+
+- the local CLI for deterministic regression testing and archived exports
+- an HTTP server for Firebase-backed live runs, Google sign-in, and human-in-the-loop pivot review
 
 ```bash
 # Build the project
@@ -36,6 +39,83 @@ go build -o discover cmd/discover/main.go
 # Or choose explicit output files plus a visualizer archive directory
 ./discover --seeds path/to/seeds.json --outputs results.json,results.csv,visualizer:exports/visualizer
 ```
+
+### Live Server
+
+```bash
+export ASSET_DISCOVERY_FIREBASE_PROJECT_ID="your-project-id"
+export ASSET_DISCOVERY_SERVER_ADDR=":8080"
+
+# Optional when running with a service-account file locally.
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+
+# Optional: use GCS for resumable run checkpoints instead of the local checkpoints/ directory.
+export ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET="your-checkpoint-bucket"
+
+go run ./cmd/server
+```
+
+For local development, you can also place those variables in `.env.local` and run:
+
+```bash
+make server
+```
+
+### Live Run Model
+
+The live server keeps the browser-facing read model in Firestore and the resumable runtime checkpoint outside Firestore:
+
+- Firestore stores runs, assets, traces, pivots, seeds, and activity events for the web client.
+- checkpoints are stored either under the local `checkpoints/` directory or in GCS when `ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET` is configured.
+- the worker is queue-ready but currently runs in-process inside the Go server.
+
+Each run is created in one of two modes:
+
+- `autonomous`: AI-judged pivots are applied automatically and the run keeps executing.
+- `manual`: AI-judged pivots are written as pending review items and the run pauses in `awaiting_review` until the creator accepts or rejects them.
+
+Creator ownership is enforced on pivot decisions. The same authenticated user who created the run must approve or reject manual pivots.
+
+The live server exposes:
+
+- `POST /api/runs`
+- `POST /api/runs/{runId}/pivots/{pivotId}/decision`
+
+Both endpoints require a Firebase ID token from a verified Google account in `@zerofox.com` or `roaguirred@gmail.com`.
+
+Cross-origin browser writes are supported only from the current demo web app origins and the local Vite dev server:
+
+- `http://localhost:5173`
+- `http://127.0.0.1:5173`
+- `https://asset-discovery-0325-f111.web.app`
+- `https://asset-discovery-0325-f111.firebaseapp.com`
+
+Requests without an `Origin` header continue to work normally, so same-origin and server-to-server callers do not depend on CORS.
+
+### Local End-to-End Development
+
+The intended local setup is the backend plus the sibling `asset-discovery-web` dev server:
+
+```bash
+# terminal 1
+make server
+
+# terminal 2
+cd ../asset-discovery-web
+npm run dev
+```
+
+Leave `VITE_ASSET_DISCOVERY_API_BASE_URL` empty in the web app for local development. Vite proxies `/api/*` and `/healthz` to `http://127.0.0.1:8080`, which avoids cross-origin browser calls during local work.
+
+For Firestore-backed integration coverage against the real emulator:
+
+```bash
+make test-firebase
+```
+
+That target starts the Firestore emulator using the sibling `asset-discovery-web/firebase.json` config, runs the `internal/runservice` suite against the emulator-backed projection store, and auto-selects an installed JDK 21+ if the default Java runtime is older.
+
+`make test-firebase` uses the Firestore emulator port from the sibling Firebase config. If you are already running another service on that port, stop it first or run the emulator test with a temporary alternate config.
 
 When `--outputs` is omitted, each run is archived under `exports/runs/<run-id>/` and a visualizer data archive is written under [`exports/visualizer/`](exports/visualizer). That archive contains `manifest.json` plus per-run snapshots under `runs/<run-id>.json`.
 

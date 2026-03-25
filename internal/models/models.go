@@ -58,6 +58,33 @@ type JudgeEvaluation struct {
 	Outcomes    []JudgeCandidateOutcome `json:"outcomes,omitempty"`
 }
 
+type CandidatePromotionDecision string
+
+const (
+	CandidatePromotionAccepted      CandidatePromotionDecision = "accepted"
+	CandidatePromotionPendingReview CandidatePromotionDecision = "pending_review"
+	CandidatePromotionRejected      CandidatePromotionDecision = "rejected"
+)
+
+type CandidatePromotionRequest struct {
+	Key        string         `json:"key"`
+	Seed       Seed           `json:"seed"`
+	Evidence   []SeedEvidence `json:"evidence,omitempty"`
+	Confidence float64        `json:"confidence,omitempty"`
+	Reasoned   bool           `json:"reasoned,omitempty"`
+}
+
+type CandidatePromotionHandler interface {
+	HandleCandidatePromotion(candidate CandidatePromotionRequest) CandidatePromotionDecision
+}
+
+type MutationListener interface {
+	OnAssetUpsert(asset Asset)
+	OnObservationAdded(observation AssetObservation)
+	OnRelationAdded(relation AssetRelation)
+	OnJudgeEvaluationRecorded(evaluation JudgeEvaluation)
+}
+
 // Enumeration represents a specific discovery run for a Seed.
 // A single Seed can have multiple Enumerations over time.
 type Enumeration struct {
@@ -211,14 +238,15 @@ type IPDetails struct {
 
 // PipelineContext represents the state passed between DAG nodes.
 type PipelineContext struct {
-	mu               sync.Mutex
-	Seeds            []Seed
-	Enumerations     []Enumeration
-	Assets           []Asset
-	Observations     []AssetObservation
-	Relations        []AssetRelation
-	Errors           []error
-	JudgeEvaluations []JudgeEvaluation
+	mu                    sync.Mutex
+	Seeds                 []Seed
+	Enumerations          []Enumeration
+	Assets                []Asset
+	Observations          []AssetObservation
+	Relations             []AssetRelation
+	Errors                []error `json:"-"`
+	JudgeEvaluations      []JudgeEvaluation
+	DNSVariantSweepLabels []string
 
 	collectionSeeds               []Seed
 	pendingSeeds                  []Seed
@@ -232,6 +260,17 @@ type PipelineContext struct {
 	assetIndexByKey               map[string]int
 	observationIndexByID          map[string]int
 	relationIndexByKey            map[string]int
+	candidateHandler              CandidatePromotionHandler
+	mutationListener              MutationListener
+}
+
+type SchedulerState struct {
+	CollectionSeeds               []Seed `json:"collection_seeds,omitempty"`
+	PendingSeeds                  []Seed `json:"pending_seeds,omitempty"`
+	CollectionDepth               int    `json:"collection_depth"`
+	MaxCollectionDepth            int    `json:"max_collection_depth"`
+	ExtraCollectionWaveReserved   bool   `json:"extra_collection_wave_reserved,omitempty"`
+	ExtraCollectionWaveInProgress bool   `json:"extra_collection_wave_in_progress,omitempty"`
 }
 
 type seedCandidate struct {
@@ -250,6 +289,51 @@ func (p *PipelineContext) Lock() {
 // Unlock releases the mutex.
 func (p *PipelineContext) Unlock() {
 	p.mu.Unlock()
+}
+
+func (p *PipelineContext) SetCandidatePromotionHandler(handler CandidatePromotionHandler) {
+	p.Lock()
+	defer p.Unlock()
+
+	p.candidateHandler = handler
+}
+
+func (p *PipelineContext) SetMutationListener(listener MutationListener) {
+	p.Lock()
+	defer p.Unlock()
+
+	p.mutationListener = listener
+}
+
+func (p *PipelineContext) SnapshotSchedulerState() SchedulerState {
+	p.Lock()
+	defer p.Unlock()
+
+	return SchedulerState{
+		CollectionSeeds:               append([]Seed(nil), p.collectionSeeds...),
+		PendingSeeds:                  append([]Seed(nil), p.pendingSeeds...),
+		CollectionDepth:               p.collectionDepth,
+		MaxCollectionDepth:            p.maxCollectionDepth,
+		ExtraCollectionWaveReserved:   p.extraCollectionWaveReserved,
+		ExtraCollectionWaveInProgress: p.extraCollectionWaveInProgress,
+	}
+}
+
+func (p *PipelineContext) RestoreSchedulerState(state SchedulerState) {
+	p.Lock()
+	defer p.Unlock()
+
+	p.collectionSeeds = append([]Seed(nil), state.CollectionSeeds...)
+	p.pendingSeeds = append([]Seed(nil), state.PendingSeeds...)
+	p.collectionDepth = state.CollectionDepth
+	p.maxCollectionDepth = state.MaxCollectionDepth
+	p.extraCollectionWaveReserved = state.ExtraCollectionWaveReserved
+	p.extraCollectionWaveInProgress = state.ExtraCollectionWaveInProgress
+	p.knownSeedKeys = make(map[string]struct{}, len(p.Seeds))
+	for _, seed := range p.Seeds {
+		p.knownSeedKeys[seedKey(seed)] = struct{}{}
+	}
+	p.candidateSeeds = make(map[string]*seedCandidate)
 }
 
 // InitializeSeedFrontier prepares the collection scheduler with the initial seed frontier.
@@ -410,6 +494,23 @@ func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence)
 		return false
 	}
 
+	if p.candidateHandler != nil {
+		promotion := CandidatePromotionRequest{
+			Key:        key,
+			Seed:       normalizeSeed(candidate.seed),
+			Evidence:   append([]SeedEvidence(nil), candidate.evidence...),
+			Confidence: candidate.maxConfidence,
+			Reasoned:   candidate.reasoned,
+		}
+		switch p.candidateHandler.HandleCandidatePromotion(promotion) {
+		case CandidatePromotionAccepted:
+			return p.materializeSeedCandidateLocked(key, candidate, mode == seedSchedulingNextWave)
+		case CandidatePromotionPendingReview, CandidatePromotionRejected:
+			delete(p.candidateSeeds, key)
+			return false
+		}
+	}
+
 	return p.materializeSeedCandidateLocked(key, candidate, mode == seedSchedulingNextWave)
 }
 
@@ -476,9 +577,13 @@ func (p *PipelineContext) RecordJudgeEvaluation(evaluation JudgeEvaluation) {
 	evaluation.Outcomes = outcomes
 
 	p.Lock()
-	defer p.Unlock()
-
 	p.JudgeEvaluations = append(p.JudgeEvaluations, evaluation)
+	listener := p.mutationListener
+	p.Unlock()
+
+	if listener != nil {
+		listener.OnJudgeEvaluationRecorded(evaluation)
+	}
 }
 
 func seedKey(seed Seed) string {

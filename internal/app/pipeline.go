@@ -138,6 +138,24 @@ func NewPipeline(cfg Config) (*Pipeline, error) {
 	}, nil
 }
 
+func NewPipelineWithEngine(engine *dag.Engine, runID string, outputs []string, provider telemetry.Provider) *Pipeline {
+	if provider == nil {
+		provider = telemetry.Noop()
+	}
+	if engine == nil {
+		engine = &dag.Engine{}
+	}
+	engine.RunID = runID
+	engine.Telemetry = provider
+
+	return &Pipeline{
+		engine:    engine,
+		outputs:   append([]string(nil), outputs...),
+		runID:     runID,
+		telemetry: provider,
+	}
+}
+
 func (p *Pipeline) Run(ctx context.Context, seeds []models.Seed) (*models.PipelineContext, error) {
 	ctx = telemetry.WithProvider(ctx, p.telemetry)
 
@@ -158,6 +176,21 @@ func (p *Pipeline) Run(ctx context.Context, seeds []models.Seed) (*models.Pipeli
 
 	telemetry.Info(ctx, "Pipeline completed successfully.")
 	return result, nil
+}
+
+func (p *Pipeline) Resume(
+	ctx context.Context,
+	pCtx *models.PipelineContext,
+	progress *dag.RunProgress,
+	callbacks dag.ResumeCallbacks,
+) (*models.PipelineContext, error) {
+	ctx = telemetry.WithProvider(ctx, p.telemetry)
+
+	if len(p.outputs) > 0 {
+		telemetry.Infof(ctx, "Export run %s will write to: %s", p.runID, strings.Join(p.outputs, ", "))
+	}
+
+	return p.engine.Resume(ctx, pCtx, progress, callbacks)
 }
 
 func (p *Pipeline) Outputs() []string {

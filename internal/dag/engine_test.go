@@ -3,6 +3,7 @@ package dag_test
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"asset-discovery/internal/dag"
@@ -76,6 +77,12 @@ func (c *frontierCollector) Process(ctx context.Context, pCtx *models.PipelineCo
 	return pCtx, nil
 }
 
+type panicCollector struct{}
+
+func (c *panicCollector) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	panic("collector exploded")
+}
+
 type seedSchedulingEnricher struct {
 	callCount int
 }
@@ -125,6 +132,31 @@ func TestEngine_Run_UsesFrontierForFollowUpCollection(t *testing.T) {
 
 	if len(resultCtx.Seeds) != 2 {
 		t.Fatalf("expected discovered seed to be registered once, got %d seeds", len(resultCtx.Seeds))
+	}
+}
+
+func TestEngine_Run_CollectorPanicIsRecorded(t *testing.T) {
+	engine := &dag.Engine{
+		Collectors: []dag.Collector{&panicCollector{}},
+	}
+
+	resultCtx, err := engine.Run(context.Background(), &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected collector panic to be contained, got %v", err)
+	}
+	if len(resultCtx.Errors) != 1 {
+		t.Fatalf("expected one recorded collector panic, got %d", len(resultCtx.Errors))
+	}
+	if got := resultCtx.Errors[0].Error(); !strings.Contains(got, "collector exploded") {
+		t.Fatalf("expected recorded panic error to mention root cause, got %q", got)
 	}
 }
 

@@ -1,4 +1,4 @@
-.PHONY: validate build test contract-test test-e2e generate
+.PHONY: validate build test contract-test test-e2e test-firebase server generate
 
 build:
 	go build -o discover cmd/discover/main.go
@@ -8,6 +8,15 @@ generate:
 
 test:
 	go test -v ./...
+
+test-firebase:
+	../asset-discovery-web/scripts/with-firebase-java.sh firebase emulators:exec --project demo-asset-discovery --config ../asset-discovery-web/firebase.json --only firestore "go test -v ./internal/runservice"
+
+server:
+	@set -a; \
+	if [ -f .env.local ]; then . ./.env.local; fi; \
+	set +a; \
+	go run ./cmd/server
 
 contract-test:
 	go test -v ./internal/export/visualizer -run 'TestContract'

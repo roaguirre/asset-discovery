@@ -457,6 +457,47 @@ func TestDNSCollector_ExhaustiveVariantSweepDoesNotTruncateLiveCandidates(t *tes
 	}
 }
 
+func TestDNSCollector_VariantSweepRunsOncePerRegistrableLabelWithinRun(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+	for _, root := range []string{"example.com", "example.net", "example.dev"} {
+		resolver.ips[root] = []string{"203.0.113.10"}
+		resolver.ns[root] = []string{"ns1.example.com"}
+	}
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.judge = nil
+	collector.variantSweepMode = DNSVariantSweepModeExhaustive
+	collector.variantSuffixes = []string{"com", "net", "dev"}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+			{ID: "seed-2", CompanyName: "Example Net", Domains: []string{"example.net"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(0)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if resolver.lookupCountByKind("NS", "example.dev") != 1 {
+		t.Fatalf("expected one NS preflight for example.dev across the run, got %d", resolver.lookupCountByKind("NS", "example.dev"))
+	}
+	if resolver.lookupCountByKind("A/AAAA", "example.dev") != 1 {
+		t.Fatalf("expected one full observation for example.dev across the run, got %d", resolver.lookupCountByKind("A/AAAA", "example.dev"))
+	}
+	if !pCtx.HasDNSVariantSweepLabel("example") {
+		t.Fatalf("expected variant sweep cache to persist the example label")
+	}
+}
+
 type dnsCollectorTestResolver struct {
 	mu         sync.Mutex
 	ips        map[string][]string

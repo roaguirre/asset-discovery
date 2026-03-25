@@ -18,13 +18,23 @@ func (p *PipelineContext) AppendAssets(assets ...Asset) {
 		return
 	}
 
-	p.Lock()
-	defer p.Unlock()
+	var assetEvents []Asset
+	var observationEvents []AssetObservation
+	var listener MutationListener
 
+	p.Lock()
 	p.ensureAssetStateLocked()
 	for _, asset := range assets {
-		p.ingestAssetLocked(asset)
+		assetEvent, observationEvent, observationAdded := p.ingestAssetLocked(asset)
+		assetEvents = append(assetEvents, assetEvent)
+		if observationAdded {
+			observationEvents = append(observationEvents, observationEvent)
+		}
 	}
+	listener = p.mutationListener
+	p.Unlock()
+
+	emitMutationEvents(listener, assetEvents, observationEvents, nil)
 }
 
 func (p *PipelineContext) AppendAssetRelations(relations ...AssetRelation) {
@@ -32,13 +42,21 @@ func (p *PipelineContext) AppendAssetRelations(relations ...AssetRelation) {
 		return
 	}
 
-	p.Lock()
-	defer p.Unlock()
+	var relationEvents []AssetRelation
+	var listener MutationListener
 
+	p.Lock()
 	p.ensureAssetStateLocked()
 	for _, relation := range relations {
-		p.addAssetRelationLocked(relation)
+		relationEvent, added := p.addAssetRelationLocked(relation)
+		if added {
+			relationEvents = append(relationEvents, relationEvent)
+		}
 	}
+	listener = p.mutationListener
+	p.Unlock()
+
+	emitMutationEvents(listener, nil, nil, relationEvents)
 }
 
 func (p *PipelineContext) AppendAssetObservations(observations ...AssetObservation) {
@@ -46,13 +64,23 @@ func (p *PipelineContext) AppendAssetObservations(observations ...AssetObservati
 		return
 	}
 
-	p.Lock()
-	defer p.Unlock()
+	var assetEvents []Asset
+	var observationEvents []AssetObservation
+	var listener MutationListener
 
+	p.Lock()
 	p.ensureAssetStateLocked()
 	for _, observation := range observations {
-		p.ingestObservationLocked(observation)
+		assetEvent, observationEvent, observationAdded := p.ingestObservationLocked(observation)
+		assetEvents = append(assetEvents, assetEvent)
+		if observationAdded {
+			observationEvents = append(observationEvents, observationEvent)
+		}
 	}
+	listener = p.mutationListener
+	p.Unlock()
+
+	emitMutationEvents(listener, assetEvents, observationEvents, nil)
 }
 
 func (p *PipelineContext) ensureAssetStateLocked() {
@@ -123,7 +151,7 @@ func (p *PipelineContext) reconcilePendingRawAssetsLocked() {
 	}
 }
 
-func (p *PipelineContext) ingestAssetLocked(asset Asset) {
+func (p *PipelineContext) ingestAssetLocked(asset Asset) (Asset, AssetObservation, bool) {
 	asset = normalizeAsset(asset)
 	if asset.ID == "" {
 		asset.ID = NewID("asset")
@@ -162,10 +190,13 @@ func (p *PipelineContext) ingestAssetLocked(asset Asset) {
 	if _, exists := p.observationIndexByID[observation.ID]; !exists {
 		p.Observations = append(p.Observations, observation)
 		p.observationIndexByID[observation.ID] = len(p.Observations) - 1
+		return cloneAsset(p.Assets[index]), observation, true
 	}
+
+	return cloneAsset(p.Assets[index]), observation, false
 }
 
-func (p *PipelineContext) ingestObservationLocked(observation AssetObservation) {
+func (p *PipelineContext) ingestObservationLocked(observation AssetObservation) (Asset, AssetObservation, bool) {
 	observation = normalizeAssetObservation(observation)
 	if observation.ID == "" {
 		observation.ID = NewID("obs")
@@ -203,10 +234,13 @@ func (p *PipelineContext) ingestObservationLocked(observation AssetObservation) 
 	if _, exists := p.observationIndexByID[observation.ID]; !exists {
 		p.Observations = append(p.Observations, observation)
 		p.observationIndexByID[observation.ID] = len(p.Observations) - 1
+		return cloneAsset(p.Assets[index]), observation, true
 	}
+
+	return cloneAsset(p.Assets[index]), observation, false
 }
 
-func (p *PipelineContext) addAssetRelationLocked(relation AssetRelation) {
+func (p *PipelineContext) addAssetRelationLocked(relation AssetRelation) (AssetRelation, bool) {
 	relation = normalizeAssetRelation(relation)
 	if relation.ID == "" {
 		relation.ID = NewID("rel")
@@ -224,11 +258,28 @@ func (p *PipelineContext) addAssetRelationLocked(relation AssetRelation) {
 
 	key := assetRelationKey(relation)
 	if _, exists := p.relationIndexByKey[key]; exists {
-		return
+		return AssetRelation{}, false
 	}
 
 	p.Relations = append(p.Relations, relation)
 	p.relationIndexByKey[key] = len(p.Relations) - 1
+	return relation, true
+}
+
+func emitMutationEvents(listener MutationListener, assets []Asset, observations []AssetObservation, relations []AssetRelation) {
+	if listener == nil {
+		return
+	}
+
+	for _, asset := range assets {
+		listener.OnAssetUpsert(asset)
+	}
+	for _, observation := range observations {
+		listener.OnObservationAdded(observation)
+	}
+	for _, relation := range relations {
+		listener.OnRelationAdded(relation)
+	}
 }
 
 func (p *PipelineContext) resolveCanonicalAssetIDLocked(assetType AssetType, identifier string) string {
@@ -650,6 +701,16 @@ func assetRelationKey(relation AssetRelation) string {
 		relation.Reason,
 		relation.DiscoveryDate.UTC().Format(time.RFC3339Nano),
 	}, "|")
+}
+
+func cloneAsset(asset Asset) Asset {
+	clone := asset
+	clone.Provenance = append([]AssetProvenance(nil), asset.Provenance...)
+	clone.DomainDetails = cloneDomainDetails(asset.DomainDetails)
+	clone.IPDetails = cloneIPDetails(asset.IPDetails)
+	clone.EnrichmentData = cloneEnrichmentData(asset.EnrichmentData)
+	clone.EnrichmentStates = cloneEnrichmentStates(asset.EnrichmentStates)
+	return clone
 }
 
 func cloneDomainDetails(details *DomainDetails) *DomainDetails {

@@ -2,7 +2,10 @@ package dag
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
+	"runtime/debug"
 	"sync"
 
 	"asset-discovery/internal/models"
@@ -53,68 +56,155 @@ type Engine struct {
 	Telemetry     telemetry.Provider
 }
 
+type RunPhase string
+
+const (
+	RunPhaseCollectionWave   RunPhase = "collection_wave"
+	RunPhaseAdvanceFrontier  RunPhase = "advance_frontier"
+	RunPhaseReconsideration  RunPhase = "reconsideration"
+	RunPhaseAdvanceExtraWave RunPhase = "advance_extra_wave"
+	RunPhaseExtraWave        RunPhase = "extra_wave"
+	RunPhaseFiltering        RunPhase = "filtering"
+	RunPhaseExporting        RunPhase = "exporting"
+	RunPhaseCompleted        RunPhase = "completed"
+)
+
+type Checkpoint string
+
+const (
+	CheckpointAfterCollectionWave Checkpoint = "after_collection_wave"
+	CheckpointAfterReconsider     Checkpoint = "after_reconsideration"
+	CheckpointAfterExtraWave      Checkpoint = "after_extra_wave"
+)
+
+type RunProgress struct {
+	Initialized bool     `json:"initialized"`
+	Wave        int      `json:"wave"`
+	Phase       RunPhase `json:"phase"`
+}
+
+type ResumeCallbacks struct {
+	AfterCheckpoint func(ctx context.Context, checkpoint Checkpoint, progress RunProgress, pCtx *models.PipelineContext) (pause bool, err error)
+}
+
+var ErrExecutionPaused = errors.New("dag execution paused")
+
 // Allow initial seeds plus two discovered frontiers so roots found in the first
 // follow-up wave still get a collection pass of their own.
 const maxSeedExpansionDepth = 2
 
 // Run executes the DAG synchronously for local E2E testing.
 func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	progress := RunProgress{}
+	return e.Resume(ctx, pCtx, &progress, ResumeCallbacks{})
+}
+
+func (e *Engine) Resume(ctx context.Context, pCtx *models.PipelineContext, progress *RunProgress, callbacks ResumeCallbacks) (*models.PipelineContext, error) {
 	provider := telemetry.OrNoop(e.Telemetry)
 	ctx = telemetry.WithProvider(ctx, provider)
 
 	ctx, runSpan := telemetry.Start(ctx, "dag.run", telemetry.String("run_id", e.RunID))
 	defer runSpan.End()
 
-	// The engine may execute multiple collection waves, but the stage order remains acyclic:
-	// frontier -> collectors -> enrichers -> next frontier.
-	pCtx.InitializeSeedFrontier(maxSeedExpansionDepth)
-	wave := 0
+	if progress == nil {
+		progress = &RunProgress{}
+	}
+
+	if !progress.Initialized {
+		// The engine may execute multiple collection waves, but the stage order remains acyclic:
+		// frontier -> collectors -> enrichers -> next frontier.
+		pCtx.InitializeSeedFrontier(maxSeedExpansionDepth)
+		progress.Initialized = true
+		progress.Wave = 0
+		progress.Phase = RunPhaseCollectionWave
+	}
 
 	for {
-		if err := e.runWave(ctx, pCtx, wave); err != nil {
-			return pCtx, err
-		}
-
-		if !pCtx.AdvanceSeedFrontier() {
-			break
-		}
-		wave++
-	}
-
-	if len(e.Reconsiderers) > 0 {
-		pCtx.ReserveExtraCollectionWave()
-		for _, reconsiderer := range e.Reconsiderers {
-			err := e.processNode(ctx, "reconsider", wave, reconsiderer, pCtx)
-			if err != nil {
-				return pCtx, err
+		switch progress.Phase {
+		case RunPhaseCollectionWave:
+			if frontier := pCtx.CollectionSeeds(); len(frontier) > 0 {
+				if err := e.runWave(ctx, pCtx, progress.Wave); err != nil {
+					return pCtx, err
+				}
 			}
-		}
-
-		if pCtx.AdvanceSeedFrontier() {
-			wave++
-			if err := e.runWave(ctx, pCtx, wave); err != nil {
+			progress.Phase = RunPhaseAdvanceFrontier
+			if paused, err := runCheckpointCallback(ctx, callbacks, CheckpointAfterCollectionWave, *progress, pCtx); err != nil {
 				return pCtx, err
+			} else if paused {
+				return pCtx, ErrExecutionPaused
 			}
+		case RunPhaseAdvanceFrontier:
+			if pCtx.AdvanceSeedFrontier() {
+				progress.Wave++
+				progress.Phase = RunPhaseCollectionWave
+				continue
+			}
+			progress.Phase = RunPhaseReconsideration
+		case RunPhaseReconsideration:
+			if len(e.Reconsiderers) > 0 {
+				pCtx.ReserveExtraCollectionWave()
+				for _, reconsiderer := range e.Reconsiderers {
+					err := e.processNode(ctx, "reconsider", progress.Wave, reconsiderer, pCtx)
+					if err != nil {
+						return pCtx, err
+					}
+				}
+			}
+			progress.Phase = RunPhaseAdvanceExtraWave
+			if paused, err := runCheckpointCallback(ctx, callbacks, CheckpointAfterReconsider, *progress, pCtx); err != nil {
+				return pCtx, err
+			} else if paused {
+				return pCtx, ErrExecutionPaused
+			}
+		case RunPhaseAdvanceExtraWave:
+			if pCtx.AdvanceSeedFrontier() {
+				progress.Wave++
+				progress.Phase = RunPhaseExtraWave
+				continue
+			}
+			progress.Phase = RunPhaseFiltering
+		case RunPhaseExtraWave:
+			if frontier := pCtx.CollectionSeeds(); len(frontier) > 0 {
+				if err := e.runWave(ctx, pCtx, progress.Wave); err != nil {
+					return pCtx, err
+				}
+			}
+			progress.Phase = RunPhaseFiltering
+			if paused, err := runCheckpointCallback(ctx, callbacks, CheckpointAfterExtraWave, *progress, pCtx); err != nil {
+				return pCtx, err
+			} else if paused {
+				return pCtx, ErrExecutionPaused
+			}
+		case RunPhaseFiltering:
+			for _, f := range e.Filters {
+				err := e.processNode(ctx, "filter", progress.Wave, f, pCtx)
+				if err != nil {
+					return pCtx, err
+				}
+			}
+			progress.Phase = RunPhaseExporting
+		case RunPhaseExporting:
+			for _, ex := range e.Exporters {
+				err := e.processNode(ctx, "export", progress.Wave, ex, pCtx)
+				if err != nil {
+					return pCtx, err
+				}
+			}
+			progress.Phase = RunPhaseCompleted
+		case RunPhaseCompleted:
+			return pCtx, nil
+		default:
+			progress.Phase = RunPhaseCompleted
+			return pCtx, nil
 		}
 	}
+}
 
-	// 3. Run Filters
-	for _, f := range e.Filters {
-		err := e.processNode(ctx, "filter", wave, f, pCtx)
-		if err != nil {
-			return pCtx, err
-		}
+func runCheckpointCallback(ctx context.Context, callbacks ResumeCallbacks, checkpoint Checkpoint, progress RunProgress, pCtx *models.PipelineContext) (bool, error) {
+	if callbacks.AfterCheckpoint == nil {
+		return false, nil
 	}
-
-	// 4. Run Exporters
-	for _, ex := range e.Exporters {
-		err := e.processNode(ctx, "export", wave, ex, pCtx)
-		if err != nil {
-			return pCtx, err
-		}
-	}
-
-	return pCtx, nil
+	return callbacks.AfterCheckpoint(ctx, checkpoint, progress, pCtx)
 }
 
 func (e *Engine) runWave(ctx context.Context, pCtx *models.PipelineContext, wave int) error {
@@ -131,6 +221,15 @@ func (e *Engine) runWave(ctx context.Context, pCtx *models.PipelineContext, wave
 			wg.Add(1)
 			go func(col Collector) {
 				defer wg.Done()
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						err := fmt.Errorf("collector %s panicked: %v", nodeTypeName(col), recovered)
+						telemetry.Errorf(waveCtx, "%v\n%s", err, debug.Stack())
+						pCtx.Lock()
+						pCtx.Errors = append(pCtx.Errors, err)
+						pCtx.Unlock()
+					}
+				}()
 				err := e.processNode(waveCtx, "collect", wave, col, pCtx)
 				if err != nil {
 					pCtx.Lock()

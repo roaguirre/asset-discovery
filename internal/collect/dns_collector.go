@@ -403,6 +403,11 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 		}
 
 		for _, labelGroup := range groupSeedRootsByLabel(baseline.seedRoots) {
+			if pCtx.HasDNSVariantSweepLabel(labelGroup.label) {
+				telemetry.Infof(ctx, "[DNS Collector] Skipping variant sweep label=%s because it already ran earlier in this run.", labelGroup.label)
+				continue
+			}
+
 			probeRoots := c.buildVariantProbeRoots(seed, labelGroup.roots, baseline.seedRoots, candidateByRoot)
 			metricsProbed += len(probeRoots)
 			if len(probeRoots) == 0 {
@@ -434,6 +439,8 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 				pivotCandidate.observation = &observation
 				pivotCandidate.rdap = observed.rdap
 			}
+
+			pCtx.MarkDNSVariantSweepLabel(labelGroup.label)
 		}
 
 		if c.judge != nil {

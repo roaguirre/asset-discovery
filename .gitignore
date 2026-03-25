@@ -3,7 +3,11 @@
 
 # Exports
 exports/
+checkpoints/
 test_*.json
+.env.local
 
 .DS_STORE
 .playwright-cli/
+
+firestore-debug.log
