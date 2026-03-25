@@ -1,4 +1,4 @@
-.PHONY: validate test test-e2e build generate refresh-visualizer
+.PHONY: validate build test contract-test test-e2e generate
 
 build:
 	go build -o discover cmd/discover/main.go
@@ -9,13 +9,14 @@ generate:
 test:
 	go test -v ./...
 
+contract-test:
+	go test -v ./internal/export/visualizer -run 'TestContract'
+
 test-e2e: build
-	# Default outputs now archive each run under exports/runs/<run-id>/ and refresh exports/visualizer.html.
+	# Manual integration check; keep this out of the default validate/CI path.
+	# Default outputs now archive each run under exports/runs/<run-id>/ and write visualizer data under exports/visualizer/.
 	./discover --seeds test.json
 
-refresh-visualizer: build
-	./discover refresh-visualizer
-
-validate: build test test-e2e
+validate: build test contract-test
 	go vet ./...
 	go fmt ./...

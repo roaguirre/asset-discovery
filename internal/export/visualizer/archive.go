@@ -5,12 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
 type ArchiveStore interface {
-	Save(htmlPath string, run Run) error
-	Load(htmlPath string) ([]Run, error)
+	Save(dir string, run Run) error
+	Load(dir string) ([]Run, error)
 }
 
 type FileArchiveStore struct{}
@@ -19,21 +18,20 @@ func NewFileArchiveStore() *FileArchiveStore {
 	return &FileArchiveStore{}
 }
 
-func (s *FileArchiveStore) Save(htmlPath string, run Run) error {
-	storageDir := storageDirForHTML(htmlPath)
-	runsDir := filepath.Join(storageDir, "runs")
+func (s *FileArchiveStore) Save(dir string, run Run) error {
+	runsDir := filepath.Join(dir, "runs")
 	if err := os.MkdirAll(runsDir, 0755); err != nil {
 		return err
 	}
 
 	snapshotPath := filepath.Join(runsDir, run.ID+".json")
 	runCopy := run
-	runCopy.DataPath = filepath.ToSlash(mustRelativePath(filepath.Dir(htmlPath), snapshotPath))
+	runCopy.DataPath = filepath.ToSlash(mustRelativePath(dir, snapshotPath))
 	if err := writeJSONFile(snapshotPath, runCopy); err != nil {
 		return err
 	}
 
-	manifestPath := filepath.Join(storageDir, "manifest.json")
+	manifestPath := filepath.Join(dir, "manifest.json")
 	manifest, err := readManifest(manifestPath)
 	if err != nil {
 		return err
@@ -43,8 +41,8 @@ func (s *FileArchiveStore) Save(htmlPath string, run Run) error {
 	return writeJSONFile(manifestPath, manifest)
 }
 
-func (s *FileArchiveStore) Load(htmlPath string) ([]Run, error) {
-	manifestPath := filepath.Join(storageDirForHTML(htmlPath), "manifest.json")
+func (s *FileArchiveStore) Load(dir string) ([]Run, error) {
+	manifestPath := filepath.Join(dir, "manifest.json")
 	manifest, err := readManifest(manifestPath)
 	if err != nil {
 		return nil, err
@@ -52,7 +50,7 @@ func (s *FileArchiveStore) Load(htmlPath string) ([]Run, error) {
 
 	runs := make([]Run, 0, len(manifest.Runs))
 	for _, summary := range manifest.Runs {
-		path := filepath.Join(filepath.Dir(htmlPath), filepath.FromSlash(summary.DataPath))
+		path := filepath.Join(dir, filepath.FromSlash(summary.DataPath))
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -73,10 +71,6 @@ func (s *FileArchiveStore) Load(htmlPath string) ([]Run, error) {
 	})
 
 	return runs, nil
-}
-
-func storageDirForHTML(path string) string {
-	return strings.TrimSuffix(path, filepath.Ext(path))
 }
 
 func readManifest(path string) (Manifest, error) {

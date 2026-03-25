@@ -1,0 +1,459 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Visualizer Run v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "label",
+    "created_at",
+    "asset_count",
+    "enumeration_count",
+    "seed_count",
+    "data_path",
+    "rows"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "label": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "asset_count": {
+      "type": "integer"
+    },
+    "enumeration_count": {
+      "type": "integer"
+    },
+    "seed_count": {
+      "type": "integer"
+    },
+    "data_path": {
+      "type": "string"
+    },
+    "downloads": {
+      "$ref": "#/definitions/downloads"
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/row"
+      }
+    },
+    "traces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/trace"
+      }
+    },
+    "judge_summary": {
+      "$ref": "#/definitions/judgeSummary"
+    }
+  },
+  "definitions": {
+    "downloads": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "json": {
+          "type": "string"
+        },
+        "csv": {
+          "type": "string"
+        },
+        "xlsx": {
+          "type": "string"
+        }
+      }
+    },
+    "evidenceGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "identifier",
+        "asset_type",
+        "source",
+        "enumeration_id",
+        "seed_id",
+        "status"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "asset_type": {
+          "type": "string"
+        },
+        "domain_kind": {
+          "type": "string"
+        },
+        "registrable_domain": {
+          "type": "string"
+        },
+        "resolution_status": {
+          "type": "string"
+        },
+        "ownership_state": {
+          "type": "string"
+        },
+        "inclusion_reason": {
+          "type": "string"
+        },
+        "asn": {
+          "type": "integer"
+        },
+        "organization": {
+          "type": "string"
+        },
+        "ptr": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "discovered_by": {
+          "type": "string"
+        },
+        "enriched_by": {
+          "type": "string"
+        },
+        "enumeration_id": {
+          "type": "string"
+        },
+        "seed_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "discovery_date": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "details": {
+          "type": "string"
+        },
+        "evidence_groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/evidenceGroup"
+          }
+        },
+        "trace_path": {
+          "type": "string"
+        }
+      }
+    },
+    "traceSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "traceLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "identifier",
+        "label"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "trace_path": {
+          "type": "string"
+        }
+      }
+    },
+    "traceContributor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "type": "string"
+        },
+        "enumeration_id": {
+          "type": "string"
+        },
+        "seed_id": {
+          "type": "string"
+        },
+        "seed_label": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "discovery_date": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "traceNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "subtitle": {
+          "type": "string"
+        },
+        "badges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "linked_asset_id": {
+          "type": "string"
+        },
+        "linked_observation_id": {
+          "type": "string"
+        },
+        "linked_relation_id": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/traceSection"
+          }
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "identifier",
+        "asset_type",
+        "source",
+        "enumeration_id",
+        "seed_id"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "asset_type": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "discovered_by": {
+          "type": "string"
+        },
+        "enriched_by": {
+          "type": "string"
+        },
+        "enumeration_id": {
+          "type": "string"
+        },
+        "seed_id": {
+          "type": "string"
+        },
+        "domain_kind": {
+          "type": "string"
+        },
+        "registrable_domain": {
+          "type": "string"
+        },
+        "resolution_status": {
+          "type": "string"
+        },
+        "contributors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/traceContributor"
+          }
+        },
+        "root_node_id": {
+          "type": "string"
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/traceNode"
+          }
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/traceSection"
+          }
+        },
+        "related": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/traceLink"
+          }
+        }
+      }
+    },
+    "judgeCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root"
+      ],
+      "properties": {
+        "root": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "explicit": {
+          "type": "boolean"
+        },
+        "support": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "judgeGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collector"
+      ],
+      "properties": {
+        "collector": {
+          "type": "string"
+        },
+        "seed_id": {
+          "type": "string"
+        },
+        "seed_label": {
+          "type": "string"
+        },
+        "seed_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scenario": {
+          "type": "string"
+        },
+        "accepted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/judgeCandidate"
+          }
+        },
+        "discarded": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/judgeCandidate"
+          }
+        }
+      }
+    },
+    "judgeSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evaluation_count",
+        "accepted_count",
+        "discarded_count"
+      ],
+      "properties": {
+        "evaluation_count": {
+          "type": "integer"
+        },
+        "accepted_count": {
+          "type": "integer"
+        },
+        "discarded_count": {
+          "type": "integer"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/judgeGroup"
+          }
+        }
+      }
+    }
+  }
+}

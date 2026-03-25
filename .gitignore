@@ -3,9 +3,7 @@
 
 # Exports
 exports/
-*.json
-*.csv
-*.xlsx
+test_*.json
 
 .DS_STORE
 .playwright-cli/

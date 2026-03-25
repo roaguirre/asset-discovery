@@ -33,11 +33,11 @@ go build -o discover cmd/discover/main.go
 # Run the discovery pipeline with archived default outputs
 ./discover --seeds path/to/seeds.json
 
-# Or choose explicit output files
-./discover --seeds path/to/seeds.json --outputs results.json,results.csv,visualizer.html
+# Or choose explicit output files plus a visualizer archive directory
+./discover --seeds path/to/seeds.json --outputs results.json,results.csv,visualizer:exports/visualizer
 ```
 
-When `--outputs` is omitted, each run is archived under `exports/runs/<run-id>/` and [`exports/visualizer.html`](exports/visualizer.html) is refreshed to show the latest run by default while keeping older runs selectable.
+When `--outputs` is omitted, each run is archived under `exports/runs/<run-id>/` and a visualizer data archive is written under [`exports/visualizer/`](exports/visualizer). That archive contains `manifest.json` plus per-run snapshots under `runs/<run-id>.json`.
 
 Exports separate registrable domains from discovered subdomains. JSON stays as a flat asset array and adds per-row `domain_kind` and `registrable_domain` metadata, CSV includes `Domain Kind` and `Registrable Domain` columns, XLSX uses dedicated `Registrable Domains` and `Subdomains` sheets, and the visualizer exposes the same split as sortable/filterable columns.
 
@@ -50,7 +50,27 @@ The visualizer uses those fields directly in the browse tables and trace view so
 
 ## Visualizer
 
-The visualizer now has two modes:
+The visualizer is now split into two pieces:
+
+- Go exports data only: `manifest.json` plus archived run JSON under `exports/visualizer/` or any `visualizer:<dir>` target.
+- The browser client lives in the separate `asset-discovery-web` repository and loads that data in the browser.
+
+This repository now owns the visualizer data contract instead of the browser implementation. The checked-in contract artifacts live under `contracts/visualizer/`:
+
+- `manifest.v1.schema.json`
+- `run.v1.schema.json`
+- `manifest.v1.fixture.json`
+- `run.v1.fixture.json`
+
+The external client keeps the existing runtime behavior:
+
+- default manifest URL `/exports/visualizer/manifest.json`
+- `?manifest=<url-to-manifest.json>` override
+- hash routes such as `#trace/<run-id>/<asset-id>`
+
+Breaking payload changes should introduce a new contract major version rather than silently replacing the v1 schema files.
+
+The client has two main modes:
 
 - **Browse views** for domains and IPs with compact inline summaries and an `Open Trace` action.
 - **Trace workspace** at `#trace/<run-id>/<asset-id>` with a left trace tree and a right detail panel.

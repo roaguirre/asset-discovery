@@ -19,13 +19,13 @@ func buildVisualizerRun(runID string, createdAt time.Time, downloads Downloads, 
 	return visualizer.BuildRun(runID, createdAt, downloads, pCtx)
 }
 
-func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
-	htmlPath := filepath.Join(t.TempDir(), "visualizer.html")
+func TestVisualizerExporter_ArchivesRunsAndWritesManifestAndSnapshots(t *testing.T) {
+	visualizerDir := filepath.Join(t.TempDir(), "visualizer")
 
 	firstRunTime := time.Date(2026, time.March, 17, 22, 50, 0, 0, time.FixedZone("-0300", -3*60*60))
-	firstExporter := NewVisualizerExporter(htmlPath, "run-1", Downloads{
-		JSON: "runs/run-1/results.json",
-		CSV:  "runs/run-1/results.csv",
+	firstExporter := NewVisualizerExporter(visualizerDir, "run-1", Downloads{
+		JSON: "../runs/run-1/results.json",
+		CSV:  "../runs/run-1/results.csv",
 	})
 	firstExporter.now = func() time.Time { return firstRunTime }
 
@@ -34,9 +34,9 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 	}
 
 	secondRunTime := firstRunTime.Add(5 * time.Minute)
-	secondExporter := NewVisualizerExporter(htmlPath, "run-2", Downloads{
-		JSON: "runs/run-2/results.json",
-		XLSX: "runs/run-2/results.xlsx",
+	secondExporter := NewVisualizerExporter(visualizerDir, "run-2", Downloads{
+		JSON: "../runs/run-2/results.json",
+		XLSX: "../runs/run-2/results.xlsx",
 	})
 	secondExporter.now = func() time.Time { return secondRunTime }
 
@@ -44,7 +44,7 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		t.Fatalf("expected second visualizer export to succeed, got %v", err)
 	}
 
-	manifestPath := filepath.Join(strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)), "manifest.json")
+	manifestPath := filepath.Join(visualizerDir, "manifest.json")
 	manifestData, err := os.ReadFile(manifestPath)
 	if err != nil {
 		t.Fatalf("expected manifest to exist, got %v", err)
@@ -63,7 +63,7 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 		t.Fatalf("expected manifest runs ordered newest-first, got %+v", manifest.Runs)
 	}
 
-	firstSnapshotPath := filepath.Join(strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)), "runs", "run-1.json")
+	firstSnapshotPath := filepath.Join(visualizerDir, "runs", "run-1.json")
 	if _, err := os.Stat(firstSnapshotPath); err != nil {
 		t.Fatalf("expected first snapshot to exist, got %v", err)
 	}
@@ -128,246 +128,6 @@ func TestVisualizerExporter_ArchivesRunsAndRendersHTML(t *testing.T) {
 
 	if len(firstTrace.Related) == 0 || firstTrace.Related[0].AssetID != "asset-1-related" {
 		t.Fatalf("expected trace to link to the related result, got %+v", firstTrace.Related)
-	}
-
-	htmlData, err := os.ReadFile(htmlPath)
-	if err != nil {
-		t.Fatalf("expected visualizer HTML to exist, got %v", err)
-	}
-
-	html := string(htmlData)
-	assertInlineScriptBalanced(t, html)
-	for _, needle := range []string{
-		"run-1",
-		"run-2",
-		"api.example.com",
-		"app.example.com",
-		"source-filter-options",
-		"splitSources",
-		"source-pill",
-		`sources: []`,
-		`state.sources.every((source) => rowSources.includes(source))`,
-		"sourceDescriptions = Object.freeze",
-		"Certificate Transparency results from crt.sh",
-		"PTR, ASN, organization, and CIDR enrichment backfill applied to canonical IP assets.",
-		`id="app-tooltip"`,
-		"data-tooltip=",
-		`data-key="identifier" data-tooltip="The domain or hostname identifier for this asset."`,
-		`data-key="asn" data-tooltip="Autonomous System Number associated with this IP address."`,
-		`data-key="ptr" data-tooltip="Reverse DNS hostname returned for this IP address, when one exists."`,
-		"showTooltip(",
-		"trace-view-button",
-		"Result Trace",
-		"Open Trace",
-		"Same Registrable Domain",
-		"#trace/run-1/asset-1",
-		"data-trace-link",
-		"Judge Analysis",
-		"Accepted And Discarded Candidates",
-		"Discarded Candidates",
-		"facebook.com",
-		"example-store.com",
-		"detail-toggle",
-		"domain-group-row",
-		"judge-view-button",
-		"llm-summary",
-		"detail-panel",
-		"trace-tree",
-		"trace-panel",
-		"trace-node-button",
-		"trace-panel-body",
-		"trace-workspace",
-		"ownership-pill",
-		"Discovered By",
-		"Enriched By",
-		"expandedRows",
-		"expandedDomainGroups",
-		"domain-group-toggle",
-		"domain-group-controls",
-		"domain-summary-trigger",
-		"domain-child-trigger",
-		"domain-child-row",
-		"domain-child-identifier",
-		"const summaryByKey = new Map();",
-		"const allDomainRows = run ? rowsForSourceFilter(run.rows) : [];",
-		"const summaryExpanded = Boolean(summaryRow) && state.expandedRows.has(summaryRow.asset_id);",
-		"const summaryRow = summaryByKey.get(group.key) || null;",
-		"const displayRow = summaryRow || group.rows[0] || null;",
-		"const childRows = group.rows.filter((row) => !summaryRow || row.asset_id !== summaryRow.asset_id);",
-		"const summaryIdentifier = escapeHTML(group.key);",
-		"Showing \" + domainGroups.length + \" registrable domains",
-		"function rowsForSourceFilter(runRows)",
-		`if (state.view === "domains") { return runRows.filter((row) => row.asset_type === "domain"); }`,
-		`if (state.view === "ips") { return runRows.filter((row) => row.asset_type === "ip"); }`,
-	} {
-		if !strings.Contains(html, needle) {
-			t.Fatalf("expected rendered HTML to contain %q", needle)
-		}
-	}
-}
-
-func assertInlineScriptBalanced(t *testing.T, html string) {
-	t.Helper()
-
-	start := strings.Index(html, "<script>")
-	if start < 0 {
-		t.Fatalf("expected rendered HTML to include an inline script")
-	}
-	start += len("<script>")
-	end := strings.Index(html[start:], "</script>")
-	if end < 0 {
-		t.Fatalf("expected rendered HTML to close the inline script")
-	}
-
-	script := html[start : start+end]
-	type stackEntry struct {
-		token rune
-		line  int
-	}
-
-	var (
-		stack          []stackEntry
-		inSingleQuote  bool
-		inDoubleQuote  bool
-		inTemplate     bool
-		inLineComment  bool
-		inBlockComment bool
-		escaped        bool
-		line           = 1
-	)
-
-	matching := map[rune]rune{'(': ')', '{': '}', '[': ']'}
-
-	for i, r := range script {
-		if r == '\n' {
-			line++
-			if inLineComment {
-				inLineComment = false
-			}
-		}
-
-		if inLineComment {
-			continue
-		}
-		if inBlockComment {
-			if r == '*' && i+1 < len(script) && script[i+1] == '/' {
-				inBlockComment = false
-			}
-			continue
-		}
-		if inSingleQuote {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if r == '\\' {
-				escaped = true
-				continue
-			}
-			if r == '\'' {
-				inSingleQuote = false
-			}
-			continue
-		}
-		if inDoubleQuote {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if r == '\\' {
-				escaped = true
-				continue
-			}
-			if r == '"' {
-				inDoubleQuote = false
-			}
-			continue
-		}
-		if inTemplate {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if r == '\\' {
-				escaped = true
-				continue
-			}
-			if r == '`' {
-				inTemplate = false
-			}
-			continue
-		}
-
-		if r == '/' && i+1 < len(script) {
-			switch script[i+1] {
-			case '/':
-				inLineComment = true
-				continue
-			case '*':
-				inBlockComment = true
-				continue
-			}
-		}
-
-		switch r {
-		case '\'':
-			inSingleQuote = true
-		case '"':
-			inDoubleQuote = true
-		case '`':
-			inTemplate = true
-		case '(', '{', '[':
-			stack = append(stack, stackEntry{token: r, line: line})
-		case ')', '}', ']':
-			if len(stack) == 0 {
-				t.Fatalf("expected balanced inline script, found unexpected %q at line %d", string(r), line)
-			}
-			top := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if matching[top.token] != r {
-				t.Fatalf("expected balanced inline script, %q at line %d was closed by %q at line %d", string(top.token), top.line, string(r), line)
-			}
-		}
-	}
-
-	if len(stack) != 0 {
-		top := stack[len(stack)-1]
-		t.Fatalf("expected balanced inline script, %q opened at line %d was never closed", string(top.token), top.line)
-	}
-}
-
-func TestRefreshVisualizerHTML_RebuildsFromArchivedSnapshots(t *testing.T) {
-	htmlPath := filepath.Join(t.TempDir(), "visualizer.html")
-	runTime := time.Date(2026, time.March, 24, 2, 10, 0, 0, time.FixedZone("-0300", -3*60*60))
-
-	exporter := NewVisualizerExporter(htmlPath, "run-refresh", Downloads{
-		JSON: "runs/run-refresh/results.json",
-	})
-	exporter.now = func() time.Time { return runTime }
-
-	if _, err := exporter.Process(context.Background(), sampleVisualizerContext("seed-1", "enum-1", "asset-1", "api.example.com", runTime)); err != nil {
-		t.Fatalf("expected visualizer export to succeed, got %v", err)
-	}
-
-	if err := os.Remove(htmlPath); err != nil {
-		t.Fatalf("expected to remove rendered visualizer before refresh, got %v", err)
-	}
-
-	if err := RefreshVisualizerHTML(htmlPath); err != nil {
-		t.Fatalf("expected visualizer refresh to rebuild archived HTML, got %v", err)
-	}
-
-	htmlData, err := os.ReadFile(htmlPath)
-	if err != nil {
-		t.Fatalf("expected refreshed visualizer HTML to exist, got %v", err)
-	}
-
-	html := string(htmlData)
-	assertInlineScriptBalanced(t, html)
-	for _, needle := range []string{"run-refresh", "api.example.com", "#trace/run-refresh/asset-1"} {
-		if !strings.Contains(html, needle) {
-			t.Fatalf("expected refreshed visualizer HTML to contain %q", needle)
-		}
 	}
 }
 
@@ -596,7 +356,7 @@ func TestBuildVisualizerRun_ObservationTraceShowsUnresolvedDNSState(t *testing.T
 }
 
 func TestVisualizerExporter_TracePreservesMergedContributorLineage(t *testing.T) {
-	htmlPath := filepath.Join(t.TempDir(), "visualizer.html")
+	visualizerDir := filepath.Join(t.TempDir(), "visualizer")
 	ts := time.Date(2026, time.March, 18, 10, 0, 0, 0, time.FixedZone("-0300", -3*60*60))
 
 	pCtx := sampleMergedVisualizerContext(ts)
@@ -609,14 +369,14 @@ func TestVisualizerExporter_TracePreservesMergedContributorLineage(t *testing.T)
 		t.Fatalf("expected merged context to collapse to 1 asset, got %d", len(pCtx.Assets))
 	}
 
-	exporter := NewVisualizerExporter(htmlPath, "run-merged", Downloads{})
+	exporter := NewVisualizerExporter(visualizerDir, "run-merged", Downloads{})
 	exporter.now = func() time.Time { return ts.Add(5 * time.Minute) }
 
 	if _, err := exporter.Process(context.Background(), pCtx); err != nil {
 		t.Fatalf("expected visualizer export to succeed, got %v", err)
 	}
 
-	snapshotPath := filepath.Join(strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)), "runs", "run-merged.json")
+	snapshotPath := filepath.Join(visualizerDir, "runs", "run-merged.json")
 	snapshotData, err := os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatalf("expected merged snapshot to be readable, got %v", err)
@@ -717,7 +477,7 @@ func TestBuildVisualizerRun_MergedDiscoveryTraceUsesProvenanceSummaryAndRichGrou
 }
 
 func TestVisualizerExporter_PreservesReconsiderationJudgeGroupAndFinalWaveAssets(t *testing.T) {
-	htmlPath := filepath.Join(t.TempDir(), "visualizer.html")
+	visualizerDir := filepath.Join(t.TempDir(), "visualizer")
 	ts := time.Date(2026, time.March, 18, 11, 0, 0, 0, time.FixedZone("-0300", -3*60*60))
 
 	pCtx := &models.PipelineContext{
@@ -800,14 +560,14 @@ func TestVisualizerExporter_PreservesReconsiderationJudgeGroupAndFinalWaveAssets
 		},
 	}
 
-	exporter := NewVisualizerExporter(htmlPath, "run-reconsidered", Downloads{})
+	exporter := NewVisualizerExporter(visualizerDir, "run-reconsidered", Downloads{})
 	exporter.now = func() time.Time { return ts.Add(3 * time.Minute) }
 
 	if _, err := exporter.Process(context.Background(), pCtx); err != nil {
 		t.Fatalf("expected visualizer export to succeed, got %v", err)
 	}
 
-	snapshotPath := filepath.Join(strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)), "runs", "run-reconsidered.json")
+	snapshotPath := filepath.Join(visualizerDir, "runs", "run-reconsidered.json")
 	snapshotData, err := os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatalf("expected reconsidered snapshot to be readable, got %v", err)

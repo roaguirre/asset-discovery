@@ -21,7 +21,11 @@ import (
 	"asset-discovery/internal/webhint"
 )
 
-const DefaultVisualizerOutput = "exports/visualizer.html"
+const (
+	VisualizerOutputPrefix     = "visualizer:"
+	DefaultVisualizerOutput    = VisualizerOutputPrefix + DefaultVisualizerOutputDir
+	DefaultVisualizerOutputDir = "exports/visualizer"
+)
 
 type Config struct {
 	Outputs         []string
@@ -39,7 +43,7 @@ type Pipeline struct {
 	telemetry telemetry.Provider
 }
 
-func NewPipeline(cfg Config) *Pipeline {
+func NewPipeline(cfg Config) (*Pipeline, error) {
 	nowFn := cfg.Now
 	if nowFn == nil {
 		nowFn = time.Now
@@ -68,6 +72,11 @@ func NewPipeline(cfg Config) *Pipeline {
 
 	ownershipJudge := ownership.NewDefaultJudge()
 	webHintJudge := webhint.NewDefaultJudge()
+
+	exporters, err := BuildExporters(outputs, resolvedRunID)
+	if err != nil {
+		return nil, err
+	}
 
 	engine := &dag.Engine{
 		Collectors: []dag.Collector{
@@ -116,7 +125,7 @@ func NewPipeline(cfg Config) *Pipeline {
 		Filters: []dag.Filter{
 			filter.NewMergeFilter(),
 		},
-		Exporters: BuildExporters(outputs, resolvedRunID),
+		Exporters: exporters,
 		RunID:     resolvedRunID,
 		Telemetry: provider,
 	}
@@ -126,7 +135,7 @@ func NewPipeline(cfg Config) *Pipeline {
 		outputs:   outputs,
 		runID:     resolvedRunID,
 		telemetry: provider,
-	}
+	}, nil
 }
 
 func (p *Pipeline) Run(ctx context.Context, seeds []models.Seed) (*models.PipelineContext, error) {
@@ -178,13 +187,20 @@ func BuildRunID(now time.Time) string {
 	return now.Format("20060102T150405.000000000-0700")
 }
 
-func BuildExporters(outputTargets []string, runID string) []dag.Exporter {
+func BuildExporters(outputTargets []string, runID string) ([]dag.Exporter, error) {
 	var exporters []dag.Exporter
 	var visualizerTargets []string
 
 	rawDownloads := export.Downloads{}
 
 	for _, out := range outputTargets {
+		if dir, isVisualizer, err := ParseVisualizerOutputTarget(out); err != nil {
+			return nil, err
+		} else if isVisualizer {
+			visualizerTargets = append(visualizerTargets, dir)
+			continue
+		}
+
 		switch strings.ToLower(filepath.Ext(out)) {
 		case ".json":
 			exporters = append(exporters, export.NewJSONExporter(out))
@@ -195,8 +211,6 @@ func BuildExporters(outputTargets []string, runID string) []dag.Exporter {
 		case ".xlsx":
 			exporters = append(exporters, export.NewXLSXExporter(out))
 			rawDownloads.XLSX = out
-		case ".html":
-			visualizerTargets = append(visualizerTargets, out)
 		default:
 			log.Printf("Warning: unsupported output format for %s, skipping.", out)
 		}
@@ -206,38 +220,47 @@ func BuildExporters(outputTargets []string, runID string) []dag.Exporter {
 		exporters = append(exporters, export.NewVisualizerExporter(out, runID, RelativeDownloads(out, rawDownloads)))
 	}
 
-	return exporters
+	return exporters, nil
 }
 
-func RelativeDownloads(htmlPath string, downloads export.Downloads) export.Downloads {
+func ParseVisualizerOutputTarget(target string) (string, bool, error) {
+	trimmed := strings.TrimSpace(target)
+	if strings.HasPrefix(trimmed, VisualizerOutputPrefix) {
+		dir := strings.TrimSpace(strings.TrimPrefix(trimmed, VisualizerOutputPrefix))
+		if dir == "" {
+			return "", true, fmt.Errorf("visualizer output %q must include a directory path after %q", target, VisualizerOutputPrefix)
+		}
+		return dir, true, nil
+	}
+
+	if strings.EqualFold(filepath.Ext(trimmed), ".html") {
+		base := strings.TrimSuffix(trimmed, filepath.Ext(trimmed))
+		if strings.TrimSpace(base) == "" {
+			base = DefaultVisualizerOutputDir
+		}
+		return "", false, fmt.Errorf("visualizer HTML output %q is no longer supported; use %q instead", target, VisualizerOutputPrefix+base)
+	}
+
+	return "", false, nil
+}
+
+func RelativeDownloads(visualizerDir string, downloads export.Downloads) export.Downloads {
 	return export.Downloads{
-		JSON: RelativeOutputPath(htmlPath, downloads.JSON),
-		CSV:  RelativeOutputPath(htmlPath, downloads.CSV),
-		XLSX: RelativeOutputPath(htmlPath, downloads.XLSX),
+		JSON: RelativeOutputPath(visualizerDir, downloads.JSON),
+		CSV:  RelativeOutputPath(visualizerDir, downloads.CSV),
+		XLSX: RelativeOutputPath(visualizerDir, downloads.XLSX),
 	}
 }
 
-func RelativeOutputPath(fromFile, toFile string) string {
+func RelativeOutputPath(fromDir, toFile string) string {
 	if toFile == "" {
 		return ""
 	}
 
-	rel, err := filepath.Rel(filepath.Dir(fromFile), toFile)
+	rel, err := filepath.Rel(fromDir, toFile)
 	if err != nil {
 		return filepath.ToSlash(toFile)
 	}
 
 	return filepath.ToSlash(rel)
-}
-
-func RefreshVisualizerHTML(path string) error {
-	if path == "" {
-		path = DefaultVisualizerOutput
-	}
-
-	if err := export.RefreshVisualizerHTML(path); err != nil {
-		return fmt.Errorf("refresh visualizer %s: %w", path, err)
-	}
-
-	return nil
 }

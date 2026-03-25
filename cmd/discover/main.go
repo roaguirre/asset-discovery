@@ -19,7 +19,6 @@ import (
 var (
 	seedsFile                string
 	outputs                  []string
-	visualizerPath           string
 	dnsVariantSweepMode      string
 	dnsVariantBatchSize      int
 	dnsVariantConcurrency    int
@@ -47,12 +46,15 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		pipeline := app.NewPipeline(app.Config{
+		pipeline, err := app.NewPipeline(app.Config{
 			Outputs:         outputs,
 			OutputsChanged:  cmd.Flags().Changed("outputs"),
 			Telemetry:       telemetry.NewStdlibProvider(log.Default()),
 			DNSVariantSweep: dnsVariantSweepConfig,
 		})
+		if err != nil {
+			return err
+		}
 
 		_, err = pipeline.Run(context.Background(), seeds)
 		if err != nil {
@@ -83,25 +85,11 @@ func init() {
 	defaultVariantSweep := collect.DefaultDNSVariantSweepConfig()
 
 	rootCmd.Flags().StringVarP(&seedsFile, "seeds", "s", "", "Path to seeds JSON file")
-	rootCmd.Flags().StringSliceVarP(&outputs, "outputs", "o", nil, "Comma separated list of output paths. If omitted, timestamped JSON/CSV/XLSX exports are written under exports/runs/<run-id>/ and exports/visualizer.html is refreshed.")
+	rootCmd.Flags().StringSliceVarP(&outputs, "outputs", "o", nil, "Comma separated list of output paths. Use file paths for JSON/CSV/XLSX and visualizer:<dir> for the client visualizer data archive. If omitted, timestamped JSON/CSV/XLSX exports are written under exports/runs/<run-id>/ and a visualizer archive is written to visualizer:exports/visualizer.")
 	rootCmd.Flags().StringVar(&dnsVariantSweepMode, "dns-variant-sweep-mode", string(defaultVariantSweep.Mode), "DNS variant sweep mode: exhaustive or prioritized")
 	rootCmd.Flags().IntVar(&dnsVariantBatchSize, "dns-variant-batch-size", defaultVariantSweep.BatchSize, "Maximum number of DNS variant roots to process per batch")
 	rootCmd.Flags().IntVar(&dnsVariantConcurrency, "dns-variant-concurrency", defaultVariantSweep.Concurrency, "Maximum number of concurrent DNS variant probes")
 	rootCmd.Flags().IntVar(&dnsVariantPrioritizedCap, "dns-variant-prioritized-cap", defaultVariantSweep.PrioritizedCap, "Maximum DNS variant roots to probe in prioritized mode")
-
-	refreshVisualizerCmd := &cobra.Command{
-		Use:   "refresh-visualizer",
-		Short: "Rebuild visualizer.html from archived visualizer snapshots",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := app.RefreshVisualizerHTML(visualizerPath); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Refreshed %s\n", visualizerPath)
-			return nil
-		},
-	}
-	refreshVisualizerCmd.Flags().StringVar(&visualizerPath, "path", app.DefaultVisualizerOutput, "Path to the visualizer HTML file to rebuild from archived snapshots")
-	rootCmd.AddCommand(refreshVisualizerCmd)
 }
 
 func main() {

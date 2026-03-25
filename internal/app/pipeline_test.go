@@ -3,6 +3,7 @@ package app
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestResolveOutputTargets_DefaultsArchiveRuns(t *testing.T) {
 }
 
 func TestResolveOutputTargets_UsesExplicitOutputs(t *testing.T) {
-	requested := []string{"custom/results.json", "custom/visualizer.html"}
+	requested := []string{"custom/results.json", "visualizer:custom/visualizer"}
 
 	outputs, _ := ResolveOutputTargets(requested, true, time.Now())
 
@@ -43,8 +44,8 @@ func TestResolveOutputTargets_UsesExplicitOutputs(t *testing.T) {
 }
 
 func TestRelativeOutputPath(t *testing.T) {
-	got := RelativeOutputPath("exports/visualizer.html", "exports/runs/20260317/results.json")
-	want := "runs/20260317/results.json"
+	got := RelativeOutputPath("exports/visualizer", "exports/runs/20260317/results.json")
+	want := "../runs/20260317/results.json"
 
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
@@ -52,15 +53,18 @@ func TestRelativeOutputPath(t *testing.T) {
 }
 
 func TestNewPipeline_AssemblesRuntimeAndStages(t *testing.T) {
-	pipeline := NewPipeline(Config{
+	pipeline, err := NewPipeline(Config{
 		OutputsChanged: true,
-		Outputs:        []string{"custom/results.json", "custom/results.csv", "custom/visualizer.html"},
+		Outputs:        []string{"custom/results.json", "custom/results.csv", "visualizer:custom/visualizer"},
 		RunID:          "run-123",
 		Telemetry:      telemetry.Noop(),
 		Now: func() time.Time {
 			return time.Date(2026, time.March, 17, 22, 45, 6, 0, time.FixedZone("-0300", -3*60*60))
 		},
 	})
+	if err != nil {
+		t.Fatalf("expected pipeline construction to succeed, got %v", err)
+	}
 
 	if pipeline.runID != "run-123" {
 		t.Fatalf("expected run ID to be preserved, got %q", pipeline.runID)
@@ -97,7 +101,7 @@ func TestNewPipeline_AssemblesRuntimeAndStages(t *testing.T) {
 }
 
 func TestNewPipeline_AppliesDNSVariantSweepOverrides(t *testing.T) {
-	pipeline := NewPipeline(Config{
+	pipeline, err := NewPipeline(Config{
 		DNSVariantSweep: collect.DNSVariantSweepConfig{
 			Mode:           collect.DNSVariantSweepModePrioritized,
 			BatchSize:      64,
@@ -105,6 +109,9 @@ func TestNewPipeline_AppliesDNSVariantSweepOverrides(t *testing.T) {
 			PrioritizedCap: 512,
 		},
 	})
+	if err != nil {
+		t.Fatalf("expected pipeline construction to succeed, got %v", err)
+	}
 
 	dnsCollector, ok := pipeline.engine.Collectors[0].(*collect.DNSCollector)
 	if !ok {
@@ -119,5 +126,25 @@ func TestNewPipeline_AppliesDNSVariantSweepOverrides(t *testing.T) {
 	}
 	if got := dnsCollector.VariantSweepConfig(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected DNS variant sweep config %+v, got %+v", want, got)
+	}
+}
+
+func TestParseVisualizerOutputTarget(t *testing.T) {
+	dir, ok, err := ParseVisualizerOutputTarget("visualizer:custom/visualizer")
+	if err != nil {
+		t.Fatalf("expected visualizer target to parse, got %v", err)
+	}
+	if !ok || dir != "custom/visualizer" {
+		t.Fatalf("expected parsed visualizer dir, got ok=%v dir=%q", ok, dir)
+	}
+}
+
+func TestBuildExporters_RejectsLegacyHTMLVisualizerTargets(t *testing.T) {
+	_, err := BuildExporters([]string{"results.json", "custom/visualizer.html"}, "run-123")
+	if err == nil {
+		t.Fatalf("expected legacy HTML visualizer target to fail")
+	}
+	if !strings.Contains(err.Error(), "visualizer:custom/visualizer") {
+		t.Fatalf("expected migration hint in error, got %v", err)
 	}
 }
