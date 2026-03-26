@@ -1,0 +1,68 @@
+#!/bin/sh
+
+set -eu
+
+HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(git -C "$HOOK_DIR" rev-parse --show-toplevel)
+
+cd "$REPO_ROOT"
+
+run_step() {
+  printf '%s\n' "pre-commit: $1"
+  shift
+  "$@"
+}
+
+snapshot_tracked_go_files() {
+  git ls-files -- '*.go' | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+
+    if [ -f "$path" ]; then
+      hash=$(git hash-object -- "$path")
+    else
+      hash="MISSING"
+    fi
+
+    printf '%s\t%s\n' "$path" "$hash"
+  done | LC_ALL=C sort
+}
+
+before_snapshot=$(mktemp)
+after_snapshot=$(mktemp)
+
+cleanup() {
+  rm -f "$before_snapshot" "$after_snapshot"
+}
+
+trap cleanup EXIT INT TERM HUP
+
+snapshot_tracked_go_files >"$before_snapshot"
+
+run_step "make validate" make validate
+
+snapshot_tracked_go_files >"$after_snapshot"
+
+changed_files=$(
+  awk -F '\t' '
+    NR == FNR {
+      before[$1] = $2
+      next
+    }
+    {
+      after[$1] = $2
+    }
+    END {
+      for (path in before) {
+        if ((path in after) && before[path] != after[path]) {
+          print path
+        }
+      }
+    }
+  ' "$before_snapshot" "$after_snapshot" | LC_ALL=C sort
+)
+
+if [ -n "$changed_files" ]; then
+  printf '%s\n' "pre-commit: make validate reformatted tracked Go files. Review and re-stage them before retrying:" >&2
+  printf '%s\n' "$changed_files" >&2
+  exit 1
+fi

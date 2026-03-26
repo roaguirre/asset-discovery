@@ -209,6 +209,16 @@ docker run -v $(pwd):/data asset-discovery --seeds /data/seeds.json --outputs /d
 
 ## Developing
 
+### Local Git Hooks
+
+Enable the tracked native Git hooks once per clone:
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+The local `pre-commit` hook runs `make validate` and stops the commit if `go fmt` rewrites tracked Go files so you can review and re-stage them.
+
 ### Generated DNS Suffix Data
 
 The DNS variant sweep uses a generated ICANN public suffix list derived from the pinned `golang.org/x/net/publicsuffix` module version in `go.mod`.

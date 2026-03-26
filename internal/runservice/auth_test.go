@@ -44,18 +44,18 @@ func TestRequireAuthRejectsUnverifiedOrDisallowedUsers(t *testing.T) {
 		wantCode int
 	}{
 		{
-			name: "verified allowed",
-			user: AuthenticatedUser{UID: "uid-1", Email: "reviewer@zerofox.com", EmailVerified: true},
+			name:     "verified allowed",
+			user:     AuthenticatedUser{UID: "uid-1", Email: "reviewer@zerofox.com", EmailVerified: true},
 			wantCode: http.StatusNoContent,
 		},
 		{
-			name: "unverified",
-			user: AuthenticatedUser{UID: "uid-2", Email: "reviewer@zerofox.com", EmailVerified: false},
+			name:     "unverified",
+			user:     AuthenticatedUser{UID: "uid-2", Email: "reviewer@zerofox.com", EmailVerified: false},
 			wantCode: http.StatusForbidden,
 		},
 		{
-			name: "disallowed",
-			user: AuthenticatedUser{UID: "uid-3", Email: "reviewer@example.com", EmailVerified: true},
+			name:     "disallowed",
+			user:     AuthenticatedUser{UID: "uid-3", Email: "reviewer@example.com", EmailVerified: true},
 			wantCode: http.StatusForbidden,
 		},
 	}

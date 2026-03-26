@@ -3,6 +3,7 @@
 ## Information for AI Agents
 
 This file describes how AI coding assistants should interact with this repository.
+See `SOUL.md` for the repository's identity, values, and decision-making posture; use this file for concrete workflow and implementation rules.
 
 ### Core Architecture
 
