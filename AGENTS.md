@@ -22,20 +22,24 @@ This file describes how AI coding assistants should interact with this repositor
 2. **Engine-owned scheduling only**: If an `Enricher` discovers new seeds, it must hand them back to the engine or scheduler layer. Do not let processing nodes control recursion, collection loops, or stage-to-stage orchestration themselves.
 3. **Frontier-based collection**: Follow-up collection waves must process only the active seed frontier, not the full historical seed set, to avoid duplicate collection work.
 4. **Strict Typing**: Ensure all JSON tags are strictly defined and follow idiomatic Go (e.g. `json:"company_name,omitempty"`).
-5. **Local Testing First**: The app must remain operable from a simple local CLI (`cmd/discover/main.go`).
-6. **No Global State**: Avoid `init()` functions that mutate global variables, pass dependencies explicitely.
-7. **Deterministic Parsing vs Ownership Reasoning**: Use deterministic code for protocol parsing, normalization, extraction, deduplication, and other stable mechanical transforms. When the task is to judge ownership, first-party scope, or whether a discovered candidate should be collected or promoted despite ambiguous evidence, prefer an LLM judge over hardcoded heuristics. Heuristics may generate candidates or evidence, but they must not silently make final ownership decisions.
-8. **Runtime-Owned Dependencies**: Shared judges, HTTP clients, telemetry providers, and other high-level dependencies should be assembled in `internal/app/` and injected into stages. Avoid adding new ad hoc construction logic inside stage implementations unless it is strictly local and low-level.
-9. **Telemetry API Only**: Stage packages should emit runtime logging/tracing through `internal/tracing/telemetry/` rather than calling the global `log` package directly.
-10. **Canonical Upserts Only**: When emitting discovered assets or runtime relations, prefer the canonical helper paths on `PipelineContext` instead of direct append patterns. The runtime model relies on those helpers to maintain canonical assets, observations, provenance, and relations consistently.
-11. **Enrich Canonical Assets**: Enrichers should iterate canonical assets and use per-stage enrichment state for cache / retry decisions. A new observation or contributor should add provenance, not force duplicate network work by default.
+5. **CI Parity Before Handoff**: Before handing work back, run the same verification path CI runs via `make validate`, not just `go test ./...`. `make validate` currently covers build, tests, vet, and formatting.
+6. **Lock-Safe Snapshots and DTOs**: Do not copy, embed, persist, or pass mutex-bearing runtime structs by value. If a runtime model such as `models.PipelineContext` carries synchronization state, use pointers for live access and define lock-free snapshot / DTO shapes for checkpoints, projections, or exports.
+7. **Local Testing First**: The app must remain operable from a simple local CLI (`cmd/discover/main.go`).
+8. **No Global State**: Avoid `init()` functions that mutate global variables, pass dependencies explicitely.
+9. **Deterministic Parsing vs Ownership Reasoning**: Use deterministic code for protocol parsing, normalization, extraction, deduplication, and other stable mechanical transforms. When the task is to judge ownership, first-party scope, or whether a discovered candidate should be collected or promoted despite ambiguous evidence, prefer an LLM judge over hardcoded heuristics. Heuristics may generate candidates or evidence, but they must not silently make final ownership decisions.
+10. **Runtime-Owned Dependencies**: Shared judges, HTTP clients, telemetry providers, and other high-level dependencies should be assembled in `internal/app/` and injected into stages. Avoid adding new ad hoc construction logic inside stage implementations unless it is strictly local and low-level.
+11. **Telemetry API Only**: Stage packages should emit runtime logging/tracing through `internal/tracing/telemetry/` rather than calling the global `log` package directly.
+12. **Canonical Upserts Only**: When emitting discovered assets or runtime relations, prefer the canonical helper paths on `PipelineContext` instead of direct append patterns. The runtime model relies on those helpers to maintain canonical assets, observations, provenance, and relations consistently.
+13. **Enrich Canonical Assets**: Enrichers should iterate canonical assets and use per-stage enrichment state for cache / retry decisions. A new observation or contributor should add provenance, not force duplicate network work by default.
 
 ### Local Dev
 
 - Preferred local server command: `make server`
 - Copy `.env.example` to `.env.local` for local server configuration
 - `make server` loads `.env.local` before running `go run ./cmd/server`
-- Primary verification command: `go test ./...`
+- Primary verification command: `make validate`
+- Faster iteration command: `go test ./...`
+- `make validate` mirrors CI and may rewrite files via `go fmt ./...`; check the working tree after it completes
 - Firestore emulator coverage: `make test-firebase`
 - `make test-firebase` uses the Firestore emulator port from the sibling `asset-discovery-web/firebase.json`; stop anything already bound to that port before running it
 
