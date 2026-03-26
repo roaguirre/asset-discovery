@@ -8,7 +8,6 @@ require (
 	firebase.google.com/go/v4 v4.19.0
 	github.com/likexian/whois v1.15.7
 	github.com/likexian/whois-parser v1.24.21
-	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	github.com/spf13/cobra v1.10.2
 	github.com/xuri/excelize/v2 v2.10.1
 	golang.org/x/net v0.52.0
