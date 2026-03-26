@@ -12,7 +12,7 @@ import (
 func TestHandler_CORSPreflightAllowedOrigin(t *testing.T) {
 	t.Parallel()
 
-	handler := NewHandler(nil, nil)
+	handler := NewHandler(nil, nil, DefaultAllowedOrigins())
 	request := httptest.NewRequest(http.MethodOptions, "/api/runs", nil)
 	request.Header.Set("Origin", "http://localhost:5173")
 	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -37,7 +37,7 @@ func TestHandler_CORSPreflightAllowedOrigin(t *testing.T) {
 func TestHandler_CORSRejectsDisallowedOrigin(t *testing.T) {
 	t.Parallel()
 
-	handler := NewHandler(nil, nil)
+	handler := NewHandler(nil, nil, DefaultAllowedOrigins())
 	request := httptest.NewRequest(http.MethodOptions, "/api/runs", nil)
 	request.Header.Set("Origin", "https://example.com")
 	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -53,7 +53,7 @@ func TestHandler_CORSRejectsDisallowedOrigin(t *testing.T) {
 func TestHandler_CORSHeadersOnAllowedOriginRequest(t *testing.T) {
 	t.Parallel()
 
-	handler := NewHandler(nil, stubVerifier{})
+	handler := NewHandler(nil, stubVerifier{}, DefaultAllowedOrigins())
 	request := httptest.NewRequest(http.MethodPost, "/api/runs", nil)
 	request.Header.Set("Origin", "https://asset-discovery-0325-f111.web.app")
 
@@ -71,7 +71,7 @@ func TestHandler_CORSHeadersOnAllowedOriginRequest(t *testing.T) {
 func TestHandler_NoOriginRequestSkipsCORS(t *testing.T) {
 	t.Parallel()
 
-	handler := NewHandler(nil, stubVerifier{})
+	handler := NewHandler(nil, stubVerifier{}, DefaultAllowedOrigins())
 	request := httptest.NewRequest(http.MethodPost, "/api/runs", nil)
 
 	recorder := httptest.NewRecorder()
@@ -108,7 +108,7 @@ func TestHandler_DecidePivotMapsErrorStatuses(t *testing.T) {
 				Email:         "other@zerofox.com",
 				EmailVerified: true,
 			},
-		})
+		}, DefaultAllowedOrigins())
 
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/api/runs/"+run.ID+"/pivots/"+pivotID+"/decision", bytes.NewBufferString(`{"decision":"accepted"}`))
@@ -128,7 +128,7 @@ func TestHandler_DecidePivotMapsErrorStatuses(t *testing.T) {
 				Email:         "reviewer@zerofox.com",
 				EmailVerified: true,
 			},
-		})
+		}, DefaultAllowedOrigins())
 
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/api/runs/"+run.ID+"/pivots/missing/decision", bytes.NewBufferString(`{"decision":"accepted"}`))
@@ -148,7 +148,7 @@ func TestHandler_DecidePivotMapsErrorStatuses(t *testing.T) {
 				Email:         "reviewer@zerofox.com",
 				EmailVerified: true,
 			},
-		})
+		}, DefaultAllowedOrigins())
 
 		firstRequest := httptest.NewRequest(http.MethodPost, "/api/runs/"+run.ID+"/pivots/"+pivotID+"/decision", bytes.NewBufferString(`{"decision":"accepted"}`))
 		firstRequest.Header.Set("Authorization", "Bearer token")

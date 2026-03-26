@@ -2,7 +2,9 @@ package runservice
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"asset-discovery/internal/tracing/lineage"
 )
@@ -34,6 +36,9 @@ func (s *MemoryProjectionStore) UpsertRun(_ context.Context, run RunRecord) erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if existing, ok := s.Runs[run.ID]; ok {
+		run = preserveExecutionLease(existing, run)
+	}
 	s.Runs[run.ID] = run
 	return nil
 }
@@ -100,5 +105,82 @@ func (s *MemoryProjectionStore) SyncTraces(_ context.Context, runID string, trac
 		projected[trace.AssetID] = trace
 	}
 	s.Traces[runID] = projected
+	return nil
+}
+
+func (s *MemoryProjectionStore) ClaimRunExecution(
+	_ context.Context,
+	runID string,
+	leaseID string,
+	now time.Time,
+	ttl time.Duration,
+) (RunRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	run, ok := s.Runs[runID]
+	if !ok {
+		return RunRecord{}, false, fmt.Errorf("run %q not found", runID)
+	}
+	if leaseIsActive(run, now) && run.ExecutionLeaseID != leaseID {
+		return run, false, nil
+	}
+
+	heartbeatAt := now
+	leaseUntil := now.Add(ttl)
+	run.ExecutionLeaseID = leaseID
+	run.ExecutionHeartbeatAt = &heartbeatAt
+	run.ExecutionLeaseUntil = &leaseUntil
+	s.Runs[runID] = run
+	return run, true, nil
+}
+
+func (s *MemoryProjectionStore) HeartbeatRunExecution(
+	_ context.Context,
+	runID string,
+	leaseID string,
+	now time.Time,
+	ttl time.Duration,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	run, ok := s.Runs[runID]
+	if !ok {
+		return fmt.Errorf("run %q not found", runID)
+	}
+	if run.ExecutionLeaseID != leaseID {
+		return fmt.Errorf("run %q lease mismatch", runID)
+	}
+
+	heartbeatAt := now
+	leaseUntil := now.Add(ttl)
+	run.ExecutionHeartbeatAt = &heartbeatAt
+	run.ExecutionLeaseUntil = &leaseUntil
+	s.Runs[runID] = run
+	return nil
+}
+
+func (s *MemoryProjectionStore) ReleaseRunExecution(
+	_ context.Context,
+	runID string,
+	leaseID string,
+	_ time.Time,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	run, ok := s.Runs[runID]
+	if !ok {
+		return fmt.Errorf("run %q not found", runID)
+	}
+	if run.ExecutionLeaseID != "" && run.ExecutionLeaseID != leaseID {
+		return fmt.Errorf("run %q lease mismatch", runID)
+	}
+
+	run.ExecutionLeaseID = ""
+	run.ExecutionHeartbeatAt = nil
+	run.ExecutionLeaseUntil = nil
+	s.Runs[runID] = run
 	return nil
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func NewHandler(service *Service, verifier AuthVerifier) http.Handler {
+func NewHandler(service *Service, verifier AuthVerifier, allowedOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -67,7 +67,7 @@ func NewHandler(service *Service, verifier AuthVerifier) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, pivot)
 	})))
-	return recoverJSON(withAPICORS(mux))
+	return recoverJSON(withAPICORS(mux, allowedOrigins))
 }
 
 func parseDecisionPath(path string) (runID string, pivotID string, err error) {
@@ -85,14 +85,16 @@ func parseDecisionPath(path string) (runID string, pivotID string, err error) {
 	return parts[2], parts[4], nil
 }
 
-var allowedCORSOrigins = map[string]struct{}{
-	"http://localhost:5173":                             {},
-	"http://127.0.0.1:5173":                             {},
-	"https://asset-discovery-0325-f111.web.app":         {},
-	"https://asset-discovery-0325-f111.firebaseapp.com": {},
-}
+func withAPICORS(next http.Handler, allowedOrigins []string) http.Handler {
+	originSet := make(map[string]struct{}, len(allowedOrigins))
+	for _, origin := range allowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		originSet[origin] = struct{}{}
+	}
 
-func withAPICORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
@@ -105,7 +107,7 @@ func withAPICORS(next http.Handler) http.Handler {
 			return
 		}
 
-		if _, ok := allowedCORSOrigins[origin]; !ok {
+		if _, ok := originSet[origin]; !ok {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "origin is not allowed"})
 			return
 		}

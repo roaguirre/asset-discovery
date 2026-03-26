@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"asset-discovery/internal/tracing/lineage"
 )
@@ -23,7 +26,15 @@ func NewFirestoreProjectionStore(client *firestore.Client) *FirestoreProjectionS
 }
 
 func (s *FirestoreProjectionStore) UpsertRun(ctx context.Context, run RunRecord) error {
-	_, err := s.client.Collection("runs").Doc(run.ID).Set(ctx, run)
+	current, err := s.loadRun(ctx, run.ID)
+	if err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("load run %s: %w", run.ID, err)
+	}
+	if err == nil {
+		run = preserveExecutionLease(current, run)
+	}
+
+	_, err = s.client.Collection("runs").Doc(run.ID).Set(ctx, run)
 	return err
 }
 
@@ -107,6 +118,118 @@ func (s *FirestoreProjectionStore) SyncTraces(ctx context.Context, runID string,
 
 func (s *FirestoreProjectionStore) runDoc(runID string) *firestore.DocumentRef {
 	return s.client.Collection("runs").Doc(runID)
+}
+
+func (s *FirestoreProjectionStore) loadRun(ctx context.Context, runID string) (RunRecord, error) {
+	snapshot, err := s.runDoc(runID).Get(ctx)
+	if err != nil {
+		return RunRecord{}, err
+	}
+
+	var run RunRecord
+	if err := snapshot.DataTo(&run); err != nil {
+		return RunRecord{}, fmt.Errorf("decode run %s: %w", runID, err)
+	}
+	return run, nil
+}
+
+func (s *FirestoreProjectionStore) ClaimRunExecution(
+	ctx context.Context,
+	runID string,
+	leaseID string,
+	now time.Time,
+	ttl time.Duration,
+) (RunRecord, bool, error) {
+	ref := s.runDoc(runID)
+	var claimed bool
+	var run RunRecord
+
+	err := s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		snapshot, err := tx.Get(ref)
+		if err != nil {
+			return err
+		}
+		if err := snapshot.DataTo(&run); err != nil {
+			return fmt.Errorf("decode run %s: %w", runID, err)
+		}
+		if leaseIsActive(run, now) && run.ExecutionLeaseID != leaseID {
+			claimed = false
+			return nil
+		}
+
+		heartbeatAt := now
+		leaseUntil := now.Add(ttl)
+		run.ExecutionLeaseID = leaseID
+		run.ExecutionHeartbeatAt = &heartbeatAt
+		run.ExecutionLeaseUntil = &leaseUntil
+		claimed = true
+		return tx.Set(ref, run)
+	})
+	if err != nil {
+		return RunRecord{}, false, fmt.Errorf("claim run execution %s: %w", runID, err)
+	}
+
+	return run, claimed, nil
+}
+
+func (s *FirestoreProjectionStore) HeartbeatRunExecution(
+	ctx context.Context,
+	runID string,
+	leaseID string,
+	now time.Time,
+	ttl time.Duration,
+) error {
+	ref := s.runDoc(runID)
+
+	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		snapshot, err := tx.Get(ref)
+		if err != nil {
+			return err
+		}
+
+		var run RunRecord
+		if err := snapshot.DataTo(&run); err != nil {
+			return fmt.Errorf("decode run %s: %w", runID, err)
+		}
+		if run.ExecutionLeaseID != leaseID {
+			return fmt.Errorf("run %q lease mismatch", runID)
+		}
+
+		heartbeatAt := now
+		leaseUntil := now.Add(ttl)
+		run.ExecutionHeartbeatAt = &heartbeatAt
+		run.ExecutionLeaseUntil = &leaseUntil
+		return tx.Set(ref, run)
+	})
+}
+
+func (s *FirestoreProjectionStore) ReleaseRunExecution(
+	ctx context.Context,
+	runID string,
+	leaseID string,
+	_ time.Time,
+) error {
+	ref := s.runDoc(runID)
+
+	return s.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		snapshot, err := tx.Get(ref)
+		if err != nil {
+			return err
+		}
+
+		var run RunRecord
+		if err := snapshot.DataTo(&run); err != nil {
+			return fmt.Errorf("decode run %s: %w", runID, err)
+		}
+		if run.ExecutionLeaseID != "" && run.ExecutionLeaseID != leaseID {
+			return fmt.Errorf("run %q lease mismatch", runID)
+		}
+
+		run.ExecutionLeaseID = ""
+		run.ExecutionHeartbeatAt = nil
+		run.ExecutionLeaseUntil = nil
+		return tx.Set(ref, run)
+	})
 }
 
 func firestoreJSONDocument(value interface{}) (map[string]interface{}, error) {

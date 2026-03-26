@@ -26,7 +26,7 @@ func NewInProcessDispatcher(ctx context.Context, processor RunProcessor) *InProc
 	return dispatcher
 }
 
-func (d *InProcessDispatcher) Enqueue(runID string) error {
+func (d *InProcessDispatcher) Enqueue(_ context.Context, runID string) error {
 	select {
 	case d.queue <- runID:
 		return nil

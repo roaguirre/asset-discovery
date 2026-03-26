@@ -74,6 +74,9 @@ type RunRecord struct {
 	UpdatedAt            time.Time        `json:"updated_at" firestore:"updated_at"`
 	StartedAt            *time.Time       `json:"started_at,omitempty" firestore:"started_at,omitempty"`
 	CompletedAt          *time.Time       `json:"completed_at,omitempty" firestore:"completed_at,omitempty"`
+	ExecutionLeaseID     string           `json:"execution_lease_id,omitempty" firestore:"execution_lease_id,omitempty"`
+	ExecutionHeartbeatAt *time.Time       `json:"execution_heartbeat_at,omitempty" firestore:"execution_heartbeat_at,omitempty"`
+	ExecutionLeaseUntil  *time.Time       `json:"execution_lease_until,omitempty" firestore:"execution_lease_until,omitempty"`
 }
 
 type SeedRecord struct {

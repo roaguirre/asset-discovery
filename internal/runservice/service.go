@@ -144,7 +144,7 @@ func (s *Service) CreateRun(ctx context.Context, user AuthenticatedUser, request
 	}
 
 	if s.dispatcher != nil {
-		if err := s.dispatcher.Enqueue(runID); err != nil {
+		if err := s.dispatcher.Enqueue(ctx, runID); err != nil {
 			return RunRecord{}, fmt.Errorf("enqueue run: %w", err)
 		}
 	}
@@ -233,7 +233,7 @@ func (s *Service) DecidePivot(ctx context.Context, user AuthenticatedUser, runID
 	}
 
 	if !hasPendingReview(snapshot.Pivots) && s.dispatcher != nil {
-		if err := s.dispatcher.Enqueue(runID); err != nil {
+		if err := s.dispatcher.Enqueue(ctx, runID); err != nil {
 			return PivotRecord{}, fmt.Errorf("enqueue resumed run: %w", err)
 		}
 	}
