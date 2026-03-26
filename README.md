@@ -227,4 +227,3 @@ Normal installs and builds do not require `make generate`; the generated file is
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for design principles and data models.
 See [AGENTS.md](AGENTS.md) for how AI coding assistants should interact with this repository.
-See [docs/dag_visualization.html](docs/dag_visualization.html) for an interactive view of the scheduler-managed pipeline and topological sort behavior.
