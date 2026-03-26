@@ -45,6 +45,7 @@ func (s *FileCheckpointStore) Load(_ context.Context, runID string) (Snapshot, e
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("unmarshal snapshot: %w", err)
 	}
+	snapshot.ensureContext()
 	return snapshot, nil
 }
 
@@ -58,12 +59,12 @@ func (s *FileCheckpointStore) Delete(_ context.Context, runID string) error {
 
 type MemoryCheckpointStore struct {
 	mu        sync.Mutex
-	snapshots map[string]Snapshot
+	snapshots map[string][]byte
 }
 
 func NewMemoryCheckpointStore() *MemoryCheckpointStore {
 	return &MemoryCheckpointStore{
-		snapshots: make(map[string]Snapshot),
+		snapshots: make(map[string][]byte),
 	}
 }
 
@@ -71,7 +72,12 @@ func (s *MemoryCheckpointStore) Save(_ context.Context, runID string, snapshot S
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.snapshots[runID] = snapshot
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal snapshot: %w", err)
+	}
+
+	s.snapshots[runID] = append([]byte(nil), data...)
 	return nil
 }
 
@@ -79,10 +85,15 @@ func (s *MemoryCheckpointStore) Load(_ context.Context, runID string) (Snapshot,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	snapshot, ok := s.snapshots[runID]
+	data, ok := s.snapshots[runID]
 	if !ok {
 		return Snapshot{}, os.ErrNotExist
 	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return Snapshot{}, fmt.Errorf("unmarshal snapshot: %w", err)
+	}
+	snapshot.ensureContext()
 	return snapshot, nil
 }
 

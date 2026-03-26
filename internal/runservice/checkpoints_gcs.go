@@ -53,6 +53,7 @@ func (s *GCSCheckpointStore) Load(ctx context.Context, runID string) (Snapshot, 
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("decode snapshot: %w", err)
 	}
+	snapshot.ensureContext()
 	return snapshot, nil
 }
 

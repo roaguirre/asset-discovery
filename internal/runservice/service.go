@@ -108,7 +108,7 @@ func (s *Service) CreateRun(ctx context.Context, user AuthenticatedUser, request
 
 	snapshot := Snapshot{
 		Run:     run,
-		Context: models.PipelineContext{Seeds: append([]models.Seed(nil), seeds...)},
+		Context: &models.PipelineContext{Seeds: append([]models.Seed(nil), seeds...)},
 		Pivots:  make(map[string]PendingPivotState),
 	}
 
@@ -119,7 +119,7 @@ func (s *Service) CreateRun(ctx context.Context, user AuthenticatedUser, request
 	if err := s.projection.UpsertRun(ctx, run); err != nil {
 		return RunRecord{}, fmt.Errorf("project run: %w", err)
 	}
-	if err := s.projection.UpsertJudgeSummary(ctx, runID, buildProjectedJudgeSummary(&snapshot.Context)); err != nil {
+	if err := s.projection.UpsertJudgeSummary(ctx, runID, buildProjectedJudgeSummary(snapshot.Context)); err != nil {
 		return RunRecord{}, fmt.Errorf("project judge summary: %w", err)
 	}
 
@@ -163,6 +163,7 @@ func (s *Service) DecidePivot(ctx context.Context, user AuthenticatedUser, runID
 	if !userOwnsRun(user, snapshot.Run) {
 		return PivotRecord{}, newForbiddenError("run access is forbidden")
 	}
+	snapshot.ensureContext()
 	snapshot.Context.RestoreSchedulerState(snapshot.SchedulerState)
 
 	root, pivot, ok := findPivotByID(snapshot.Pivots, pivotID)
@@ -287,6 +288,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 		return fmt.Errorf("load snapshot: %w", err)
 	}
 	snapshotLoaded = true
+	snapshot.ensureContext()
 	snapshot.Context.RestoreSchedulerState(snapshot.SchedulerState)
 	if snapshot.Pivots == nil {
 		snapshot.Pivots = make(map[string]PendingPivotState)
@@ -299,7 +301,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 	localDownloads := buildDownloads(pipeline.Outputs())
 
 	broker := newPivotBroker(snapshot.Run.Mode, snapshot.Pivots, s.now)
-	listener := newProjectionMutationListener(ctx, snapshot.Run, &snapshot.Context, s.projection, s.now)
+	listener := newProjectionMutationListener(ctx, snapshot.Run, snapshot.Context, s.projection, s.now)
 	snapshot.Context.SetCandidatePromotionHandler(broker)
 	snapshot.Context.SetMutationListener(listener)
 
@@ -323,7 +325,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 		return fmt.Errorf("project start event: %w", err)
 	}
 
-	_, err = pipeline.Resume(ctx, &snapshot.Context, &snapshot.Progress, dag.ResumeCallbacks{
+	_, err = pipeline.Resume(ctx, snapshot.Context, &snapshot.Progress, dag.ResumeCallbacks{
 		AfterCheckpoint: func(ctx context.Context, checkpoint dag.Checkpoint, progress dag.RunProgress, pCtx *models.PipelineContext) (bool, error) {
 			snapshot.Progress = progress
 			snapshot.SchedulerState = pCtx.SnapshotSchedulerState()
@@ -423,7 +425,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 		snapshot.Run.LastError = ""
 		snapshot.SchedulerState = snapshot.Context.SnapshotSchedulerState()
 		snapshot.Pivots = broker.Snapshot()
-		if err := hydratePivotsFromJudges(&snapshot, &snapshot.Context, s.now()); err != nil {
+		if err := hydratePivotsFromJudges(&snapshot, snapshot.Context, s.now()); err != nil {
 			return err
 		}
 		updateRunCounters(&snapshot)
@@ -456,9 +458,10 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 }
 
 func (s *Service) projectSnapshot(ctx context.Context, snapshot *Snapshot) error {
-	rows, traces := buildProjectedAssetReadModel(snapshot.Run.ID, &snapshot.Context)
-	judgeSummary := buildProjectedJudgeSummary(&snapshot.Context)
-	applyProjectedRunMetrics(&snapshot.Run, &snapshot.Context, countPendingPivots(snapshot.Pivots), judgeSummary)
+	snapshot.ensureContext()
+	rows, traces := buildProjectedAssetReadModel(snapshot.Run.ID, snapshot.Context)
+	judgeSummary := buildProjectedJudgeSummary(snapshot.Context)
+	applyProjectedRunMetrics(&snapshot.Run, snapshot.Context, countPendingPivots(snapshot.Pivots), judgeSummary)
 
 	if err := s.projection.UpsertRun(ctx, snapshot.Run); err != nil {
 		return fmt.Errorf("upsert run: %w", err)
@@ -512,8 +515,9 @@ func buildDownloads(outputs []string) export.Downloads {
 }
 
 func updateRunCounters(snapshot *Snapshot) {
-	judgeSummary := buildProjectedJudgeSummary(&snapshot.Context)
-	applyProjectedRunMetrics(&snapshot.Run, &snapshot.Context, countPendingPivots(snapshot.Pivots), judgeSummary)
+	snapshot.ensureContext()
+	judgeSummary := buildProjectedJudgeSummary(snapshot.Context)
+	applyProjectedRunMetrics(&snapshot.Run, snapshot.Context, countPendingPivots(snapshot.Pivots), judgeSummary)
 	snapshot.Run.CurrentWave = snapshot.Progress.Wave
 }
 

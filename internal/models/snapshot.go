@@ -1,12 +1,13 @@
 package models
 
-// SnapshotReadModel returns a deep-cloned snapshot of the user-facing pipeline
-// state so concurrent exporters and live projections can read it safely.
-func (p *PipelineContext) SnapshotReadModel() PipelineContext {
+// SnapshotReadModel returns a deep-cloned pipeline snapshot so concurrent
+// exporters and live projections can read it safely without copying the live
+// mutex-bearing runtime context by value.
+func (p *PipelineContext) SnapshotReadModel() *PipelineContext {
 	p.Lock()
 	defer p.Unlock()
 
-	return PipelineContext{
+	return &PipelineContext{
 		Seeds:                 cloneSeeds(p.Seeds),
 		Enumerations:          cloneEnumerations(p.Enumerations),
 		Assets:                cloneAssets(p.Assets),

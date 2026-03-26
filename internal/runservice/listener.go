@@ -38,7 +38,7 @@ func newProjectionMutationListener(
 
 func (l *projectionMutationListener) OnAssetUpsert(asset models.Asset) {
 	snapshot := l.pCtx.SnapshotReadModel()
-	row, ok := buildProjectedAssetRow(l.run.ID, &snapshot, asset.ID)
+	row, ok := buildProjectedAssetRow(l.run.ID, snapshot, asset.ID)
 	if !ok {
 		return
 	}
@@ -126,10 +126,10 @@ func (l *projectionMutationListener) setErr(err error) {
 	}
 }
 
-func (l *projectionMutationListener) syncRunProjection(snapshot models.PipelineContext) error {
+func (l *projectionMutationListener) syncRunProjection(snapshot *models.PipelineContext) error {
 	l.mu.Lock()
-	judgeSummary := buildProjectedJudgeSummary(&snapshot)
-	applyProjectedRunMetrics(&l.run, &snapshot, l.run.PendingPivotCount, judgeSummary)
+	judgeSummary := buildProjectedJudgeSummary(snapshot)
+	applyProjectedRunMetrics(&l.run, snapshot, l.run.PendingPivotCount, judgeSummary)
 	l.run.UpdatedAt = l.now()
 	run := l.run
 	l.mu.Unlock()
@@ -140,8 +140,8 @@ func (l *projectionMutationListener) syncRunProjection(snapshot models.PipelineC
 	return nil
 }
 
-func (l *projectionMutationListener) syncJudgeProjection(snapshot models.PipelineContext) error {
-	if err := l.projection.UpsertJudgeSummary(l.ctx, l.run.ID, buildProjectedJudgeSummary(&snapshot)); err != nil {
+func (l *projectionMutationListener) syncJudgeProjection(snapshot *models.PipelineContext) error {
+	if err := l.projection.UpsertJudgeSummary(l.ctx, l.run.ID, buildProjectedJudgeSummary(snapshot)); err != nil {
 		return fmt.Errorf("project judge summary: %w", err)
 	}
 	return nil

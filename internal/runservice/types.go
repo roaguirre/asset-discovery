@@ -133,10 +133,18 @@ type PendingPivotState struct {
 	DecisionByEmail string                           `json:"decision_by_email,omitempty"`
 }
 
+// Snapshot captures the persisted run state needed to resume pipeline
+// execution and rebuild live projections.
 type Snapshot struct {
 	Run            RunRecord                    `json:"run"`
-	Context        models.PipelineContext       `json:"context"`
+	Context        *models.PipelineContext      `json:"context"`
 	SchedulerState models.SchedulerState        `json:"scheduler_state"`
 	Progress       dag.RunProgress              `json:"progress"`
 	Pivots         map[string]PendingPivotState `json:"pivots,omitempty"`
+}
+
+func (s *Snapshot) ensureContext() {
+	if s.Context == nil {
+		s.Context = &models.PipelineContext{}
+	}
 }
