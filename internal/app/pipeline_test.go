@@ -14,7 +14,7 @@ import (
 func TestResolveOutputTargets_DefaultsToFileExports(t *testing.T) {
 	now := time.Date(2026, time.March, 17, 22, 45, 6, 123456789, time.FixedZone("-0300", -3*60*60))
 
-	outputs, runID := ResolveOutputTargets(nil, false, now)
+	outputs, runID := ResolveOutputTargets(nil, false, "", now)
 
 	expectedRunID := "20260317T224506.123456789-0300"
 	expectedOutputs := []string{
@@ -35,10 +35,30 @@ func TestResolveOutputTargets_DefaultsToFileExports(t *testing.T) {
 func TestResolveOutputTargets_UsesExplicitOutputs(t *testing.T) {
 	requested := []string{"custom/results.json", "custom/results.csv", "custom/results.xlsx"}
 
-	outputs, _ := ResolveOutputTargets(requested, true, time.Now())
+	outputs, _ := ResolveOutputTargets(requested, true, "", time.Now())
 
 	if !reflect.DeepEqual(outputs, requested) {
 		t.Fatalf("expected explicit outputs %v, got %v", requested, outputs)
+	}
+}
+
+func TestResolveOutputTargets_UsesProvidedRunIDForDefaultExports(t *testing.T) {
+	now := time.Date(2026, time.March, 17, 22, 45, 6, 123456789, time.FixedZone("-0300", -3*60*60))
+	runID := "20260326T173829.266550955+0000"
+
+	outputs, resolvedRunID := ResolveOutputTargets(nil, false, runID, now)
+
+	expectedOutputs := []string{
+		filepath.Join("exports", "runs", runID, "results.json"),
+		filepath.Join("exports", "runs", runID, "results.csv"),
+		filepath.Join("exports", "runs", runID, "results.xlsx"),
+	}
+
+	if resolvedRunID != runID {
+		t.Fatalf("expected run ID %q, got %q", runID, resolvedRunID)
+	}
+	if !reflect.DeepEqual(outputs, expectedOutputs) {
+		t.Fatalf("expected outputs %v, got %v", expectedOutputs, outputs)
 	}
 }
 
@@ -87,6 +107,34 @@ func TestNewPipeline_AssemblesRuntimeAndStages(t *testing.T) {
 	}
 	if got := dnsCollector.VariantSweepConfig(); got.Mode != collect.DNSVariantSweepModeExhaustive {
 		t.Fatalf("expected default DNS variant sweep mode to be exhaustive, got %+v", got)
+	}
+}
+
+func TestNewPipeline_UsesProvidedRunIDForGeneratedOutputs(t *testing.T) {
+	runID := "20260326T173829.266550955+0000"
+
+	pipeline, err := NewPipeline(Config{
+		RunID:     runID,
+		Telemetry: telemetry.Noop(),
+		Now: func() time.Time {
+			return time.Date(2026, time.March, 17, 22, 45, 6, 0, time.FixedZone("-0300", -3*60*60))
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected pipeline construction to succeed, got %v", err)
+	}
+
+	expectedOutputs := []string{
+		filepath.Join("exports", "runs", runID, "results.json"),
+		filepath.Join("exports", "runs", runID, "results.csv"),
+		filepath.Join("exports", "runs", runID, "results.xlsx"),
+	}
+
+	if pipeline.runID != runID {
+		t.Fatalf("expected pipeline run ID %q, got %q", runID, pipeline.runID)
+	}
+	if !reflect.DeepEqual(pipeline.outputs, expectedOutputs) {
+		t.Fatalf("expected generated outputs %v, got %v", expectedOutputs, pipeline.outputs)
 	}
 }
 

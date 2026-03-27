@@ -49,14 +49,12 @@ func NewPipeline(cfg Config) (*Pipeline, error) {
 
 	runID := cfg.RunID
 	now := nowFn()
-	if runID == "" {
-		runID = BuildRunID(now)
-	}
-
-	outputs, resolvedRunID := ResolveOutputTargets(cfg.Outputs, cfg.OutputsChanged, now)
-	if cfg.RunID != "" {
-		resolvedRunID = cfg.RunID
-	}
+	outputs, resolvedRunID := ResolveOutputTargets(
+		cfg.Outputs,
+		cfg.OutputsChanged,
+		runID,
+		now,
+	)
 
 	provider := cfg.Telemetry
 	if provider == nil {
@@ -199,8 +197,16 @@ func (p *Pipeline) RunID() string {
 	return p.runID
 }
 
-func ResolveOutputTargets(requested []string, outputsChanged bool, now time.Time) ([]string, string) {
-	runID := BuildRunID(now)
+func ResolveOutputTargets(
+	requested []string,
+	outputsChanged bool,
+	requestedRunID string,
+	now time.Time,
+) ([]string, string) {
+	runID := strings.TrimSpace(requestedRunID)
+	if runID == "" {
+		runID = BuildRunID(now)
+	}
 	if outputsChanged {
 		return append([]string(nil), requested...), runID
 	}
