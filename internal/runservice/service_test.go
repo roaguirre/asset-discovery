@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,30 @@ type capturingArtifactStore struct {
 	fail      error
 	published export.Downloads
 	calls     []export.Downloads
+}
+
+// statusTrackingProjectionStore records the run statuses projected over time so
+// tests can catch stale live-state regressions during streaming updates.
+type statusTrackingProjectionStore struct {
+	*MemoryProjectionStore
+
+	mu       sync.Mutex
+	statuses map[string][]RunStatus
+}
+
+func newStatusTrackingProjectionStore() *statusTrackingProjectionStore {
+	return &statusTrackingProjectionStore{
+		MemoryProjectionStore: NewMemoryProjectionStore(),
+		statuses:              make(map[string][]RunStatus),
+	}
+}
+
+func (s *statusTrackingProjectionStore) UpsertRun(ctx context.Context, run RunRecord) error {
+	s.mu.Lock()
+	s.statuses[run.ID] = append(s.statuses[run.ID], run.Status)
+	s.mu.Unlock()
+
+	return s.MemoryProjectionStore.UpsertRun(ctx, run)
 }
 
 func (s *capturingArtifactStore) Publish(
@@ -98,10 +123,20 @@ func newTestService(
 	mode RunMode,
 	store *capturingArtifactStore,
 ) (*Service, *MemoryCheckpointStore, *MemoryProjectionStore, RunRecord) {
+	projection := NewMemoryProjectionStore()
+	service, checkpoints, run := newTestServiceWithProjection(t, mode, store, projection)
+	return service, checkpoints, projection, run
+}
+
+func newTestServiceWithProjection(
+	t *testing.T,
+	mode RunMode,
+	store *capturingArtifactStore,
+	projection ProjectionStore,
+) (*Service, *MemoryCheckpointStore, RunRecord) {
 	t.Helper()
 
 	checkpoints := NewMemoryCheckpointStore()
-	projection := NewMemoryProjectionStore()
 	outputRoot := t.TempDir()
 	now := func() time.Time {
 		return time.Date(2026, time.March, 25, 12, 0, 0, 0, time.UTC)
@@ -156,7 +191,43 @@ func newTestService(
 		t.Fatalf("CreateRun() error = %v", err)
 	}
 
-	return service, checkpoints, projection, run
+	return service, checkpoints, run
+}
+
+func TestService_ProcessRun_DoesNotReprojectQueuedStatusAfterRunningStarts(t *testing.T) {
+	projection := newStatusTrackingProjectionStore()
+	service, _, run := newTestServiceWithProjection(
+		t,
+		RunModeManual,
+		nil,
+		projection,
+	)
+
+	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("ProcessRun() error = %v", err)
+	}
+
+	statuses := projection.statuses[run.ID]
+	if len(statuses) < 2 {
+		t.Fatalf("expected multiple projected statuses, got %+v", statuses)
+	}
+
+	runningIndex := -1
+	for index, status := range statuses {
+		if status == RunStatusRunning {
+			runningIndex = index
+			break
+		}
+	}
+	if runningIndex == -1 {
+		t.Fatalf("expected running status in projected sequence, got %+v", statuses)
+	}
+
+	for _, status := range statuses[runningIndex+1:] {
+		if status == RunStatusQueued {
+			t.Fatalf("queued status was re-projected after running started: %+v", statuses)
+		}
+	}
 }
 
 func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {

@@ -301,9 +301,7 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 	localDownloads := buildDownloads(pipeline.Outputs())
 
 	broker := newPivotBroker(snapshot.Run.Mode, snapshot.Pivots, s.now)
-	listener := newProjectionMutationListener(ctx, snapshot.Run, snapshot.Context, s.projection, s.now)
 	snapshot.Context.SetCandidatePromotionHandler(broker)
-	snapshot.Context.SetMutationListener(listener)
 
 	now := s.now()
 	snapshot.Run.Status = RunStatusRunning
@@ -324,6 +322,18 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 	}); err != nil {
 		return fmt.Errorf("project start event: %w", err)
 	}
+
+	// Build the mutation listener only after the live run document reflects the
+	// running transition so streamed asset updates cannot re-project a stale
+	// queued status.
+	listener := newProjectionMutationListener(
+		ctx,
+		snapshot.Run,
+		snapshot.Context,
+		s.projection,
+		s.now,
+	)
+	snapshot.Context.SetMutationListener(listener)
 
 	_, err = pipeline.Resume(ctx, snapshot.Context, &snapshot.Progress, dag.ResumeCallbacks{
 		AfterCheckpoint: func(ctx context.Context, checkpoint dag.Checkpoint, progress dag.RunProgress, pCtx *models.PipelineContext) (bool, error) {
