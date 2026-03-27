@@ -46,6 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: docker
     environment: production
+    env:
+      OPENAI_API_KEY_SECRET: asset-discovery-openai-api-key
     concurrency:
       group: asset-discovery-production
       cancel-in-progress: false
@@ -92,6 +94,7 @@ jobs:
           --tasks 1
           --max-retries 0
           --task-timeout 3600s
+          --set-secrets "OPENAI_API_KEY=${OPENAI_API_KEY_SECRET}:latest"
           --set-env-vars "^##^ASSET_DISCOVERY_FIREBASE_PROJECT_ID=${{ vars.ASSET_DISCOVERY_FIREBASE_PROJECT_ID }}##ASSET_DISCOVERY_EXPORT_GCS_BUCKET=${{ vars.ASSET_DISCOVERY_EXPORT_GCS_BUCKET }}##ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET=${{ vars.ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET }}##ASSET_DISCOVERY_EXPORT_GCS_PREFIX=${{ vars.ASSET_DISCOVERY_EXPORT_GCS_PREFIX }}"
 
       - name: Deploy Cloud Run API service
@@ -104,4 +107,5 @@ jobs:
           --image "$API_IMAGE"
           --service-account "${{ vars.RUNTIME_SERVICE_ACCOUNT }}"
           --allow-unauthenticated
+          --set-secrets "OPENAI_API_KEY=${OPENAI_API_KEY_SECRET}:latest"
           --set-env-vars "^##^ASSET_DISCOVERY_FIREBASE_PROJECT_ID=${{ vars.ASSET_DISCOVERY_FIREBASE_PROJECT_ID }}##ASSET_DISCOVERY_EXPORT_GCS_BUCKET=${{ vars.ASSET_DISCOVERY_EXPORT_GCS_BUCKET }}##ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET=${{ vars.ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET }}##ASSET_DISCOVERY_EXPORT_GCS_PREFIX=${{ vars.ASSET_DISCOVERY_EXPORT_GCS_PREFIX }}##ASSET_DISCOVERY_ALLOWED_ORIGINS=${{ vars.ASSET_DISCOVERY_ALLOWED_ORIGINS }}##ASSET_DISCOVERY_WORKER_JOB_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}##ASSET_DISCOVERY_WORKER_JOB_REGION=${{ vars.GCP_REGION }}##ASSET_DISCOVERY_WORKER_JOB_NAME=${{ vars.CLOUD_RUN_JOB }}"
