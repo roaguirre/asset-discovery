@@ -17,6 +17,7 @@ import (
 	"asset-discovery/internal/discovery"
 	export "asset-discovery/internal/export"
 	"asset-discovery/internal/models"
+	"asset-discovery/internal/ownership"
 )
 
 type PipelineFactory func(runID string) (*app.Pipeline, error)
@@ -106,9 +107,14 @@ func (s *Service) CreateRun(ctx context.Context, user AuthenticatedUser, request
 		PendingPivotCount: 0,
 	}
 
+	pCtx := &models.PipelineContext{Seeds: append([]models.Seed(nil), seeds...)}
+	pCtx.SetCandidatePromotionConfidenceThreshold(
+		candidatePromotionConfidenceThreshold(mode),
+	)
+
 	snapshot := Snapshot{
 		Run:     run,
-		Context: &models.PipelineContext{Seeds: append([]models.Seed(nil), seeds...)},
+		Context: pCtx,
 		Pivots:  make(map[string]PendingPivotState),
 	}
 
@@ -290,6 +296,9 @@ func (s *Service) ProcessRun(ctx context.Context, runID string) (err error) {
 	snapshotLoaded = true
 	snapshot.ensureContext()
 	snapshot.Context.RestoreSchedulerState(snapshot.SchedulerState)
+	snapshot.Context.SetCandidatePromotionConfidenceThreshold(
+		candidatePromotionConfidenceThreshold(snapshot.Run.Mode),
+	)
 	if snapshot.Pivots == nil {
 		snapshot.Pivots = make(map[string]PendingPivotState)
 	}
@@ -646,6 +655,13 @@ func promotionRoot(candidate models.CandidatePromotionRequest) string {
 		}
 	}
 	return strings.TrimSpace(strings.ToLower(candidate.Seed.ID))
+}
+
+func candidatePromotionConfidenceThreshold(mode RunMode) float64 {
+	if mode == RunModeManual {
+		return ownership.ManualReviewConfidenceThreshold
+	}
+	return ownership.DefaultHighConfidenceThreshold
 }
 
 func hydratePivotsFromJudges(snapshot *Snapshot, pCtx *models.PipelineContext, now time.Time) error {

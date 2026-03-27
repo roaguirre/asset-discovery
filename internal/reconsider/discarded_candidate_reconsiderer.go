@@ -115,7 +115,10 @@ func (r *DiscardedCandidateReconsiderer) Process(ctx context.Context, pCtx *mode
 			if !decision.Collect {
 				continue
 			}
-			if !ownership.IsHighConfidence(decision.Confidence) {
+			if !ownership.IsConfidenceAtLeast(
+				decision.Confidence,
+				pCtx.CandidatePromotionConfidenceThreshold(),
+			) {
 				telemetry.Infof(
 					ctx,
 					"[Discarded Candidate Reconsiderer] Skipping %s due to low-confidence judge decision %.2f.",

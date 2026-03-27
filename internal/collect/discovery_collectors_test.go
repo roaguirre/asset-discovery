@@ -327,6 +327,57 @@ func TestWebHintCollector_SkipsLowConfidenceJudgeDecision(t *testing.T) {
 	}
 }
 
+func TestWebHintCollector_PromotesManualModeLowConfidenceJudgeDecision(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`
+			<html>
+				<body>
+					<a href="https://example-manual-review.com/about">About our group</a>
+				</body>
+			</html>
+		`))
+	}))
+	defer server.Close()
+
+	confidence := ownership.ManualReviewConfidenceThreshold + 0.01
+	judge := &stubWebHintJudge{
+		hints: []webhint.Decision{
+			{
+				Root:       "example-manual-review.com",
+				Kind:       "llm_link",
+				Confidence: confidence,
+			},
+		},
+	}
+
+	collector := NewWebHintCollector()
+	collector.client = server.Client()
+	collector.judge = judge
+	collector.buildTargets = func(domain string) []webFetchTarget {
+		return []webFetchTarget{{URL: server.URL, Kind: "homepage"}}
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.SetCandidatePromotionConfidenceThreshold(ownership.ManualReviewConfidenceThreshold)
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if !assetExists(pCtx.Assets, "example-manual-review.com") {
+		t.Fatalf("expected manual-mode low-confidence web hint root to be added as an asset, got %+v", pCtx.Assets)
+	}
+	if !seedExists(pCtx.Seeds, "example-manual-review.com") {
+		t.Fatalf("expected manual-mode low-confidence web hint root to be promoted into seeds, got %+v", pCtx.Seeds)
+	}
+}
+
 func TestReverseRegistrationCollector_PromotesValidatedCandidate(t *testing.T) {
 	collector := NewReverseRegistrationCollector()
 	collector.judge = &stubOwnershipJudge{

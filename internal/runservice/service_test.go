@@ -13,6 +13,7 @@ import (
 	"asset-discovery/internal/dag"
 	export "asset-discovery/internal/export"
 	"asset-discovery/internal/models"
+	"asset-discovery/internal/ownership"
 	"asset-discovery/internal/tracing/telemetry"
 )
 
@@ -227,6 +228,33 @@ func TestService_ProcessRun_DoesNotReprojectQueuedStatusAfterRunningStarts(t *te
 		if status == RunStatusQueued {
 			t.Fatalf("queued status was re-projected after running started: %+v", statuses)
 		}
+	}
+}
+
+func TestCandidatePromotionConfidenceThreshold_UsesModeSpecificThresholds(t *testing.T) {
+	testCases := []struct {
+		name string
+		mode RunMode
+		want float64
+	}{
+		{
+			name: "manual",
+			mode: RunModeManual,
+			want: ownership.ManualReviewConfidenceThreshold,
+		},
+		{
+			name: "autonomous",
+			mode: RunModeAutonomous,
+			want: ownership.DefaultHighConfidenceThreshold,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := candidatePromotionConfidenceThreshold(testCase.mode); got != testCase.want {
+				t.Fatalf("candidatePromotionConfidenceThreshold(%q) = %v, want %v", testCase.mode, got, testCase.want)
+			}
+		})
 	}
 }
 

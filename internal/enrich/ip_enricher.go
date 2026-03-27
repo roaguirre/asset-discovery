@@ -240,7 +240,10 @@ func (e *IPEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) 
 			if !decision.Collect {
 				continue
 			}
-			if !ownership.IsHighConfidence(decision.Confidence) {
+			if !ownership.IsConfidenceAtLeast(
+				decision.Confidence,
+				pCtx.CandidatePromotionConfidenceThreshold(),
+			) {
 				telemetry.Infof(ctx, "[IP Enricher] Skipping PTR-derived registrable domain %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
 				continue
 			}

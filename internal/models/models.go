@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const defaultCandidatePromotionConfidenceThreshold = 0.50
+
 // Seed represents the starting point for discovery.
 // A Seed can contain various indicators that help OSINT collectors find assets.
 type Seed struct {
@@ -262,6 +264,8 @@ type PipelineContext struct {
 	relationIndexByKey            map[string]int
 	candidateHandler              CandidatePromotionHandler
 	mutationListener              MutationListener
+	candidatePromotionThreshold   float64
+	candidatePromotionPolicySet   bool
 }
 
 type SchedulerState struct {
@@ -291,6 +295,8 @@ func (p *PipelineContext) Unlock() {
 	p.mu.Unlock()
 }
 
+// SetCandidatePromotionHandler installs the handler that decides whether a
+// discovered seed is accepted immediately, queued for review, or rejected.
 func (p *PipelineContext) SetCandidatePromotionHandler(handler CandidatePromotionHandler) {
 	p.Lock()
 	defer p.Unlock()
@@ -298,11 +304,42 @@ func (p *PipelineContext) SetCandidatePromotionHandler(handler CandidatePromotio
 	p.candidateHandler = handler
 }
 
+// SetMutationListener installs the observer that receives live updates as the
+// pipeline appends assets, observations, relations, and judge evaluations.
 func (p *PipelineContext) SetMutationListener(listener MutationListener) {
 	p.Lock()
 	defer p.Unlock()
 
 	p.mutationListener = listener
+}
+
+// SetCandidatePromotionConfidenceThreshold configures the minimum confidence
+// required before judge-approved candidates are promoted into the seed frontier.
+func (p *PipelineContext) SetCandidatePromotionConfidenceThreshold(threshold float64) {
+	p.Lock()
+	defer p.Unlock()
+
+	switch {
+	case threshold < 0:
+		threshold = 0
+	case threshold > 1:
+		threshold = 1
+	}
+
+	p.candidatePromotionThreshold = threshold
+	p.candidatePromotionPolicySet = true
+}
+
+// CandidatePromotionConfidenceThreshold returns the minimum confidence required
+// for judge-approved candidates to enter the promotion flow for this run.
+func (p *PipelineContext) CandidatePromotionConfidenceThreshold() float64 {
+	p.Lock()
+	defer p.Unlock()
+
+	if !p.candidatePromotionPolicySet {
+		return defaultCandidatePromotionConfidenceThreshold
+	}
+	return p.candidatePromotionThreshold
 }
 
 func (p *PipelineContext) SnapshotSchedulerState() SchedulerState {

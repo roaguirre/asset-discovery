@@ -244,7 +244,10 @@ func (c *ReverseRegistrationCollector) Process(ctx context.Context, pCtx *models
 			if !decision.Collect {
 				continue
 			}
-			if !ownership.IsHighConfidence(decision.Confidence) {
+			if !ownership.IsConfidenceAtLeast(
+				decision.Confidence,
+				pCtx.CandidatePromotionConfidenceThreshold(),
+			) {
 				telemetry.Infof(ctx, "[Reverse Registration Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
 				continue
 			}

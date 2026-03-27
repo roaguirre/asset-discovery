@@ -184,7 +184,10 @@ func (c *CrawlerCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				if !decision.Collect {
 					continue
 				}
-				if !ownership.IsHighConfidence(decision.Confidence) {
+				if !ownership.IsConfidenceAtLeast(
+					decision.Confidence,
+					pCtx.CandidatePromotionConfidenceThreshold(),
+				) {
 					telemetry.Infof(ctx, "[Crawler Collector] Skipping %s due to low-confidence judge decision %.2f.", decision.Root, decision.Confidence)
 					continue
 				}

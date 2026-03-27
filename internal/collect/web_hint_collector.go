@@ -189,7 +189,10 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 			accepted := false
 			candidate := discovery.BuildDiscoveredSeed(seed, root, "web-hint-pivot")
 			for _, evidence := range evidences {
-				if !ownership.IsHighConfidence(evidence.Confidence) {
+				if !ownership.IsConfidenceAtLeast(
+					evidence.Confidence,
+					pCtx.CandidatePromotionConfidenceThreshold(),
+				) {
 					telemetry.Infof(ctx, "[Web Hint Collector] Skipping %s due to low-confidence judge decision %.2f.", root, evidence.Confidence)
 					continue
 				}
