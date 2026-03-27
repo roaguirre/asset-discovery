@@ -76,6 +76,14 @@ type CandidatePromotionRequest struct {
 	Reasoned   bool           `json:"reasoned,omitempty"`
 }
 
+// ExecutionEvent describes a runtime activity update that should be streamed
+// to live observers without relying on infrastructure logs.
+type ExecutionEvent struct {
+	Kind     string                 `json:"kind"`
+	Message  string                 `json:"message"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
+}
+
 type CandidatePromotionHandler interface {
 	HandleCandidatePromotion(candidate CandidatePromotionRequest) CandidatePromotionDecision
 }
@@ -85,6 +93,7 @@ type MutationListener interface {
 	OnObservationAdded(observation AssetObservation)
 	OnRelationAdded(relation AssetRelation)
 	OnJudgeEvaluationRecorded(evaluation JudgeEvaluation)
+	OnExecutionEvent(event ExecutionEvent)
 }
 
 // Enumeration represents a specific discovery run for a Seed.
@@ -305,12 +314,35 @@ func (p *PipelineContext) SetCandidatePromotionHandler(handler CandidatePromotio
 }
 
 // SetMutationListener installs the observer that receives live updates as the
-// pipeline appends assets, observations, relations, and judge evaluations.
+// pipeline appends assets, observations, relations, judge evaluations, and
+// execution events.
 func (p *PipelineContext) SetMutationListener(listener MutationListener) {
 	p.Lock()
 	defer p.Unlock()
 
 	p.mutationListener = listener
+}
+
+// EmitExecutionEvent forwards a runtime activity update to the installed live
+// observer when the event carries meaningful content.
+func (p *PipelineContext) EmitExecutionEvent(event ExecutionEvent) {
+	if p == nil {
+		return
+	}
+
+	event.Kind = strings.TrimSpace(event.Kind)
+	event.Message = strings.TrimSpace(event.Message)
+	if event.Kind == "" || event.Message == "" {
+		return
+	}
+
+	p.Lock()
+	listener := p.mutationListener
+	p.Unlock()
+
+	if listener != nil {
+		listener.OnExecutionEvent(event)
+	}
 }
 
 // SetCandidatePromotionConfidenceThreshold configures the minimum confidence

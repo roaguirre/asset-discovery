@@ -231,6 +231,41 @@ func TestService_ProcessRun_DoesNotReprojectQueuedStatusAfterRunningStarts(t *te
 	}
 }
 
+func TestService_ProcessRun_ProjectsStageLifecycleEvents(t *testing.T) {
+	service, _, projection, run := newTestService(t, RunModeManual, nil)
+
+	if err := service.ProcessRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("ProcessRun() error = %v", err)
+	}
+
+	events := projection.Events[run.ID]
+	if len(events) == 0 {
+		t.Fatalf("expected projected events for run %s", run.ID)
+	}
+
+	var sawStageStarted bool
+	var sawStageCompleted bool
+	for _, event := range events {
+		switch event.Kind {
+		case "stage_started":
+			if strings.Contains(event.Message, "scriptedCollector") {
+				sawStageStarted = true
+			}
+		case "stage_completed":
+			if strings.Contains(event.Message, "scriptedCollector") {
+				sawStageCompleted = true
+			}
+		}
+	}
+
+	if !sawStageStarted {
+		t.Fatalf("expected stage_started event for scriptedCollector, got %+v", events)
+	}
+	if !sawStageCompleted {
+		t.Fatalf("expected stage_completed event for scriptedCollector, got %+v", events)
+	}
+}
+
 func TestCandidatePromotionConfidenceThreshold_UsesModeSpecificThresholds(t *testing.T) {
 	testCases := []struct {
 		name string

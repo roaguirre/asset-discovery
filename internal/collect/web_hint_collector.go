@@ -80,6 +80,16 @@ func NewWebHintCollector(options ...WebHintCollectorOption) *WebHintCollector {
 
 func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
 	telemetry.Info(ctx, "[Web Hint Collector] Processing seeds...")
+	if c.judge == nil {
+		pCtx.EmitExecutionEvent(models.ExecutionEvent{
+			Kind:    "judge_disabled",
+			Message: "Web hint judge is disabled; external ownership hints will be observed but not promoted.",
+			Metadata: map[string]interface{}{
+				"collector": "web_hint_collector",
+				"judge":     "web_hint",
+			},
+		})
+	}
 
 	var newEnums []models.Enumeration
 	var newErrors []error

@@ -254,6 +254,17 @@ func (e *Engine) runWave(ctx context.Context, pCtx *models.PipelineContext, wave
 
 func (e *Engine) processNode(ctx context.Context, stage string, wave int, node Node, pCtx *models.PipelineContext) error {
 	nodeName := nodeTypeName(node)
+	if pCtx != nil {
+		pCtx.EmitExecutionEvent(models.ExecutionEvent{
+			Kind:    "stage_started",
+			Message: fmt.Sprintf("Started %s stage %s in wave %d.", stage, nodeName, wave),
+			Metadata: map[string]interface{}{
+				"stage": stage,
+				"node":  nodeName,
+				"wave":  wave,
+			},
+		})
+	}
 	nodeCtx, span := telemetry.Start(
 		ctx,
 		"dag.node",
@@ -265,6 +276,23 @@ func (e *Engine) processNode(ctx context.Context, stage string, wave int, node N
 
 	_, err := node.Process(nodeCtx, pCtx)
 	span.End(telemetry.Err(err))
+	if pCtx != nil {
+		event := models.ExecutionEvent{
+			Kind:    "stage_completed",
+			Message: fmt.Sprintf("Completed %s stage %s in wave %d.", stage, nodeName, wave),
+			Metadata: map[string]interface{}{
+				"stage": stage,
+				"node":  nodeName,
+				"wave":  wave,
+			},
+		}
+		if err != nil {
+			event.Kind = "stage_failed"
+			event.Message = fmt.Sprintf("Failed %s stage %s in wave %d: %v.", stage, nodeName, wave, err)
+			event.Metadata["error"] = err.Error()
+		}
+		pCtx.EmitExecutionEvent(event)
+	}
 	return err
 }
 

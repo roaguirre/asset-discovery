@@ -32,6 +32,7 @@ See `SOUL.md` for the repository's identity, values, and decision-making posture
 11. **Telemetry API Only**: Stage packages should emit runtime logging/tracing through `internal/tracing/telemetry/` rather than calling the global `log` package directly.
 12. **Canonical Upserts Only**: When emitting discovered assets or runtime relations, prefer the canonical helper paths on `PipelineContext` instead of direct append patterns. The runtime model relies on those helpers to maintain canonical assets, observations, provenance, and relations consistently.
 13. **Enrich Canonical Assets**: Enrichers should iterate canonical assets and use per-stage enrichment state for cache / retry decisions. A new observation or contributor should add provenance, not force duplicate network work by default.
+14. **Live Activity Must Explain Silent States**: When a stage can no-op because optional runtime configuration is missing, emit an explicit live execution event so the web Activity view explains that behavior without requiring Cloud Run log access.
 
 ### Local Dev
 

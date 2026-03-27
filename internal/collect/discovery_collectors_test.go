@@ -8,12 +8,40 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/ownership"
 	"asset-discovery/internal/webhint"
 )
+
+type recordingMutationListener struct {
+	mu     sync.Mutex
+	events []models.ExecutionEvent
+}
+
+func (l *recordingMutationListener) OnAssetUpsert(asset models.Asset) {}
+
+func (l *recordingMutationListener) OnObservationAdded(observation models.AssetObservation) {}
+
+func (l *recordingMutationListener) OnRelationAdded(relation models.AssetRelation) {}
+
+func (l *recordingMutationListener) OnJudgeEvaluationRecorded(evaluation models.JudgeEvaluation) {}
+
+func (l *recordingMutationListener) OnExecutionEvent(event models.ExecutionEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.events = append(l.events, event)
+}
+
+func (l *recordingMutationListener) Events() []models.ExecutionEvent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return append([]models.ExecutionEvent(nil), l.events...)
+}
 
 func TestASNCIDRCollector_PromotesPTRRootWhenSignalsStack(t *testing.T) {
 	collector := NewASNCIDRCollector()
@@ -184,6 +212,8 @@ func TestWebHintCollector_SkipsExternalAnchorRootsWithoutJudge(t *testing.T) {
 			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
 		},
 	}
+	listener := &recordingMutationListener{}
+	pCtx.SetMutationListener(listener)
 	pCtx.InitializeSeedFrontier(1)
 
 	if _, err := collector.Process(context.Background(), pCtx); err != nil {
@@ -192,6 +222,17 @@ func TestWebHintCollector_SkipsExternalAnchorRootsWithoutJudge(t *testing.T) {
 
 	if assetExists(pCtx.Assets, "whatsapp.com") {
 		t.Fatalf("expected external anchor root to be skipped without a judge, got %+v", pCtx.Assets)
+	}
+
+	events := listener.Events()
+	if len(events) != 1 {
+		t.Fatalf("expected one execution event for disabled judge, got %+v", events)
+	}
+	if events[0].Kind != "judge_disabled" {
+		t.Fatalf("expected judge_disabled event, got %+v", events[0])
+	}
+	if !strings.Contains(events[0].Message, "Web hint judge is disabled") {
+		t.Fatalf("expected disabled-judge message, got %+v", events[0])
 	}
 }
 
