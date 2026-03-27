@@ -113,6 +113,8 @@ Leave `VITE_ASSET_DISCOVERY_API_BASE_URL` empty in the web app for local develop
 
 The live download flow no longer serves local `exports/runs/...` files directly. New runs need `ASSET_DISCOVERY_EXPORT_GCS_BUCKET` on the Go server and `VITE_FIREBASE_EXPORTS_BUCKET` in the web app so downloadable artifacts are published to Firebase Storage.
 
+If tokenized Firebase Storage `alt=media` download URLs start returning `412 Precondition Failed` with the Firebase service-account error, treat that as a bucket-linkage issue rather than a Go upload failure. Re-link the named exports bucket from the Firebase Storage console, wait for propagation, and confirm `ASSET_DISCOVERY_EXPORT_GCS_BUCKET` still matches `VITE_FIREBASE_EXPORTS_BUCKET` in the sibling web app.
+
 For Firestore-backed integration coverage against the real emulator:
 
 ```bash
