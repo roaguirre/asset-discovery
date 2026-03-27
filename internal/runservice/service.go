@@ -664,6 +664,15 @@ func candidatePromotionConfidenceThreshold(mode RunMode) float64 {
 	return ownership.DefaultHighConfidenceThreshold
 }
 
+const manualAutoRejectionConfidenceThreshold = 0.80
+
+func autoRejectedDiscardStatus(mode RunMode, confidence float64) PivotDecisionStatus {
+	if mode == RunModeManual && !ownership.IsConfidenceAtLeast(confidence, manualAutoRejectionConfidenceThreshold) {
+		return PivotDecisionPendingReview
+	}
+	return PivotDecisionAutoRejected
+}
+
 func hydratePivotsFromJudges(snapshot *Snapshot, pCtx *models.PipelineContext, now time.Time) error {
 	if snapshot.Pivots == nil {
 		snapshot.Pivots = make(map[string]PendingPivotState)
@@ -690,8 +699,10 @@ func hydratePivotsFromJudges(snapshot *Snapshot, pCtx *models.PipelineContext, n
 							CompanyName: root,
 							Domains:     []string{root},
 						},
+						Confidence: outcome.Confidence,
+						Reasoned:   true,
 					},
-					Status:    PivotDecisionAutoRejected,
+					Status:    autoRejectedDiscardStatus(snapshot.Run.Mode, outcome.Confidence),
 					CreatedAt: now,
 				}
 			}

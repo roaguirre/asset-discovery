@@ -293,6 +293,87 @@ func TestCandidatePromotionConfidenceThreshold_UsesModeSpecificThresholds(t *tes
 	}
 }
 
+func TestAutoRejectedDiscardStatus_UsesHigherManualThreshold(t *testing.T) {
+	testCases := []struct {
+		name       string
+		mode       RunMode
+		confidence float64
+		want       PivotDecisionStatus
+	}{
+		{
+			name:       "manual low confidence stays reviewable",
+			mode:       RunModeManual,
+			confidence: 0.22,
+			want:       PivotDecisionPendingReview,
+		},
+		{
+			name:       "manual high confidence auto rejects",
+			mode:       RunModeManual,
+			confidence: 0.81,
+			want:       PivotDecisionAutoRejected,
+		},
+		{
+			name:       "autonomous low confidence still auto rejects",
+			mode:       RunModeAutonomous,
+			confidence: 0.22,
+			want:       PivotDecisionAutoRejected,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := autoRejectedDiscardStatus(testCase.mode, testCase.confidence); got != testCase.want {
+				t.Fatalf("autoRejectedDiscardStatus(%q, %.2f) = %s, want %s", testCase.mode, testCase.confidence, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestHydratePivotsFromJudges_ManualLowConfidenceDiscardCreatesReviewablePivot(t *testing.T) {
+	now := time.Date(2026, time.March, 27, 12, 0, 0, 0, time.UTC)
+	snapshot := Snapshot{
+		Run: RunRecord{
+			ID:   "run-1",
+			Mode: RunModeManual,
+		},
+	}
+	pCtx := &models.PipelineContext{}
+	pCtx.RecordJudgeEvaluation(models.JudgeEvaluation{
+		Collector: "web_hint_collector",
+		Scenario:  "web ownership hints",
+		Outcomes: []models.JudgeCandidateOutcome{
+			{
+				Root:       "example-review.com",
+				Collect:    false,
+				Confidence: 0.22,
+				Kind:       "llm_link",
+				Reason:     "Signals are weak and conflicting.",
+				Support:    []string{"Homepage link appears once."},
+			},
+		},
+	})
+
+	if err := hydratePivotsFromJudges(&snapshot, pCtx, now); err != nil {
+		t.Fatalf("hydratePivotsFromJudges() error = %v", err)
+	}
+
+	pivot, exists := snapshot.Pivots["example-review.com"]
+	if !exists {
+		t.Fatalf("expected hydrated pivot for low-confidence manual discard, got %+v", snapshot.Pivots)
+	}
+	if pivot.Status != PivotDecisionPendingReview {
+		t.Fatalf("expected pending_review status, got %s", pivot.Status)
+	}
+	if pivot.Candidate.Confidence != 0.22 {
+		t.Fatalf("expected pivot confidence 0.22, got %.2f", pivot.Candidate.Confidence)
+	}
+
+	record := buildPivotRecord(pivot)
+	if record.RecommendationScore != 0.22 {
+		t.Fatalf("expected projected recommendation score 0.22, got %.2f", record.RecommendationScore)
+	}
+}
+
 func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
 	artifactStore := &capturingArtifactStore{
 		published: export.Downloads{

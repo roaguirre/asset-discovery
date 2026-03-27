@@ -187,6 +187,8 @@ func TestWebHintCollector_UsesInjectedJudgeForExternalAnchorRoots(t *testing.T) 
 	}
 }
 
+// TestWebHintCollector_SkipsExternalAnchorRootsWithoutJudge verifies external
+// roots stay out of the frontier when the optional judge is unavailable.
 func TestWebHintCollector_SkipsExternalAnchorRootsWithoutJudge(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -225,14 +227,176 @@ func TestWebHintCollector_SkipsExternalAnchorRootsWithoutJudge(t *testing.T) {
 	}
 
 	events := listener.Events()
-	if len(events) != 1 {
-		t.Fatalf("expected one execution event for disabled judge, got %+v", events)
+	disabledEvent, ok := findExecutionEvent(events, "judge_disabled")
+	if !ok {
+		t.Fatalf("expected judge_disabled event, got %+v", events)
 	}
-	if events[0].Kind != "judge_disabled" {
-		t.Fatalf("expected judge_disabled event, got %+v", events[0])
+	if !strings.Contains(disabledEvent.Message, "Web hint judge is disabled") {
+		t.Fatalf("expected disabled-judge message, got %+v", disabledEvent)
 	}
-	if !strings.Contains(events[0].Message, "Web hint judge is disabled") {
-		t.Fatalf("expected disabled-judge message, got %+v", events[0])
+	if _, ok := findExecutionEvent(events, "web_hint_candidates_discovered"); !ok {
+		t.Fatalf("expected web_hint_candidates_discovered event, got %+v", events)
+	}
+	if _, ok := findExecutionEvent(events, "web_hint_candidates_unjudged"); !ok {
+		t.Fatalf("expected web_hint_candidates_unjudged event, got %+v", events)
+	}
+}
+
+// TestWebHintCollector_EmitsNoCandidateDiagnostics verifies the collector
+// explains no-op runs when fetched pages never leave the seed root.
+func TestWebHintCollector_EmitsNoCandidateDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`
+			<html>
+				<head>
+					<link rel="canonical" href="https://example.com/">
+				</head>
+				<body>
+					<a href="https://example.com/contact">Contact</a>
+				</body>
+			</html>
+		`))
+	}))
+	defer server.Close()
+
+	collector := NewWebHintCollector()
+	collector.client = server.Client()
+	collector.judge = &stubWebHintJudge{}
+	collector.buildTargets = func(domain string) []webFetchTarget {
+		return []webFetchTarget{{URL: server.URL, Kind: "homepage"}}
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	listener := &recordingMutationListener{}
+	pCtx.SetMutationListener(listener)
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	event, ok := findExecutionEvent(listener.Events(), "web_hint_no_candidates")
+	if !ok {
+		t.Fatalf("expected web_hint_no_candidates event, got %+v", listener.Events())
+	}
+	if got, ok := event.Metadata["target_count"].(int); !ok || got != 1 {
+		t.Fatalf("expected target_count=1, got %+v", event.Metadata)
+	}
+	if got, ok := event.Metadata["successful_fetch_count"].(int); !ok || got != 1 {
+		t.Fatalf("expected successful_fetch_count=1, got %+v", event.Metadata)
+	}
+}
+
+// TestWebHintCollector_EmitsFetchFailureDiagnostics verifies target fetch
+// failures surface in live activity instead of disappearing into a silent no-op.
+func TestWebHintCollector_EmitsFetchFailureDiagnostics(t *testing.T) {
+	collector := NewWebHintCollector()
+	collector.client = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial timeout")
+		}),
+	}
+	collector.judge = &stubWebHintJudge{}
+	collector.buildTargets = func(domain string) []webFetchTarget {
+		return []webFetchTarget{{URL: "https://example.com", Kind: "homepage"}}
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	listener := &recordingMutationListener{}
+	pCtx.SetMutationListener(listener)
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if _, ok := findExecutionEvent(listener.Events(), "web_hint_fetch_failed"); !ok {
+		t.Fatalf("expected web_hint_fetch_failed event, got %+v", listener.Events())
+	}
+	noCandidates, ok := findExecutionEvent(listener.Events(), "web_hint_no_candidates")
+	if !ok {
+		t.Fatalf("expected web_hint_no_candidates event after fetch failure, got %+v", listener.Events())
+	}
+	if got, ok := noCandidates.Metadata["error_count"].(int); !ok || got != 1 {
+		t.Fatalf("expected error_count=1, got %+v", noCandidates.Metadata)
+	}
+}
+
+// TestWebHintCollector_EmitsJudgeDiagnostics verifies the collector records
+// candidate discovery and judge outcomes even when nothing is ultimately accepted.
+func TestWebHintCollector_EmitsJudgeDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`
+			<html>
+				<body>
+					<a href="https://portal.example-ops.com/contact">Contact our operations team</a>
+				</body>
+			</html>
+		`))
+	}))
+	defer server.Close()
+
+	collector := NewWebHintCollector()
+	collector.client = server.Client()
+	collector.judge = &stubWebHintJudge{
+		hints: []webhint.Decision{
+			{
+				Root:       "example-ops.com",
+				Collect:    false,
+				Confidence: 0.22,
+				Reason:     "Separate vendor portal.",
+				Explicit:   true,
+			},
+		},
+	}
+	collector.buildTargets = func(domain string) []webFetchTarget {
+		return []webFetchTarget{{URL: server.URL, Kind: "homepage"}}
+	}
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	listener := &recordingMutationListener{}
+	pCtx.SetMutationListener(listener)
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	candidatesEvent, ok := findExecutionEvent(listener.Events(), "web_hint_candidates_discovered")
+	if !ok {
+		t.Fatalf("expected web_hint_candidates_discovered event, got %+v", listener.Events())
+	}
+	if got, ok := candidatesEvent.Metadata["candidate_roots"].([]string); !ok || len(got) != 1 || got[0] != "example-ops.com" {
+		t.Fatalf("expected example-ops.com candidate root, got %+v", candidatesEvent.Metadata)
+	}
+
+	judgeEvent, ok := findExecutionEvent(listener.Events(), "web_hint_judge_completed")
+	if !ok {
+		t.Fatalf("expected web_hint_judge_completed event, got %+v", listener.Events())
+	}
+	if got, ok := judgeEvent.Metadata["accepted_count"].(int); !ok || got != 0 {
+		t.Fatalf("expected accepted_count=0, got %+v", judgeEvent.Metadata)
+	}
+	if got, ok := judgeEvent.Metadata["discarded_count"].(int); !ok || got != 1 {
+		t.Fatalf("expected discarded_count=1, got %+v", judgeEvent.Metadata)
+	}
+
+	if _, ok := findExecutionEvent(listener.Events(), "web_hint_no_accepted_candidates"); !ok {
+		t.Fatalf("expected web_hint_no_accepted_candidates event, got %+v", listener.Events())
 	}
 }
 
@@ -650,6 +814,16 @@ func assetExists(assets []models.Asset, identifier string) bool {
 		}
 	}
 	return false
+}
+
+// findExecutionEvent returns the first execution event with the requested kind.
+func findExecutionEvent(events []models.ExecutionEvent, kind string) (models.ExecutionEvent, bool) {
+	for _, event := range events {
+		if event.Kind == kind {
+			return event, true
+		}
+	}
+	return models.ExecutionEvent{}, false
 }
 
 type stubWebHintJudge struct {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -29,6 +30,15 @@ type webFetchTarget struct {
 type webHint struct {
 	Root     string
 	Evidence models.SeedEvidence
+}
+
+type webHintSeedStats struct {
+	targetCount          int
+	successfulFetchCount int
+	skippedStatusCount   int
+	fetchErrorCount      int
+	readErrorCount       int
+	parseErrorCount      int
 }
 
 // WebHintCollector mines conservative ownership hints from the primary site.
@@ -96,6 +106,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 	var newAssets []models.Asset
 
 	for _, seed := range pCtx.CollectionSeeds() {
+		seedLabel := webHintSeedLabel(seed)
 		enum := models.Enumeration{
 			ID:        models.NewID("enum-web-hint"),
 			SeedID:    seed.ID,
@@ -115,6 +126,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 		judgeBaseDomain := ""
 		candidateByRoot := make(map[string]*webhint.Candidate)
 		seenSamples := make(map[string]map[string]struct{})
+		stats := webHintSeedStats{}
 		addCandidate := func(raw, text string) {
 			collectWebHintCandidates(candidateByRoot, seenSamples, knownRoots, raw, text)
 		}
@@ -124,6 +136,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				judgeBaseDomain = baseDomain
 			}
 			for _, target := range c.buildTargets(baseDomain) {
+				stats.targetCount++
 				resp, err := fetchutil.DoRequest(ctx, c.client, func(ctx context.Context) (*http.Request, error) {
 					retryReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target.URL, nil)
 					if err != nil {
@@ -133,12 +146,60 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 					return retryReq, nil
 				})
 				if err != nil {
+					stats.fetchErrorCount++
+					telemetry.Errorf(
+						ctx,
+						"[Web Hint Collector] Fetch failed for %s (%s) while evaluating %s: %v",
+						target.URL,
+						target.Kind,
+						seedLabel,
+						err,
+					)
+					emitWebHintEvent(
+						pCtx,
+						seed,
+						judgeBaseDomain,
+						"web_hint_fetch_failed",
+						fmt.Sprintf("Web hint collector failed to fetch %s for %s.", target.Kind, seedLabel),
+						map[string]interface{}{
+							"error":       err.Error(),
+							"target_kind": target.Kind,
+							"target_url":  target.URL,
+						},
+					)
 					continue
 				}
 				if resp.StatusCode >= 400 {
+					stats.skippedStatusCount++
+					telemetry.Infof(
+						ctx,
+						"[Web Hint Collector] Skipping %s (%s) for %s due to HTTP %d.",
+						target.URL,
+						target.Kind,
+						seedLabel,
+						resp.StatusCode,
+					)
+					emitWebHintEvent(
+						pCtx,
+						seed,
+						judgeBaseDomain,
+						"web_hint_target_skipped",
+						fmt.Sprintf(
+							"Web hint collector skipped %s for %s due to HTTP %d.",
+							target.Kind,
+							seedLabel,
+							resp.StatusCode,
+						),
+						map[string]interface{}{
+							"status_code": resp.StatusCode,
+							"target_kind": target.Kind,
+							"target_url":  target.URL,
+						},
+					)
 					resp.Body.Close()
 					continue
 				}
+				stats.successfulFetchCount++
 
 				finalRoot := discovery.RegistrableDomain(resp.Request.URL.Hostname())
 				if target.Kind == "homepage" && finalRoot != "" && finalRoot != discovery.RegistrableDomain(baseDomain) {
@@ -148,7 +209,28 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 				resp.Body.Close()
 				if err != nil {
+					stats.readErrorCount++
 					newErrors = append(newErrors, err)
+					telemetry.Errorf(
+						ctx,
+						"[Web Hint Collector] Failed to read %s (%s) for %s: %v",
+						target.URL,
+						target.Kind,
+						seedLabel,
+						err,
+					)
+					emitWebHintEvent(
+						pCtx,
+						seed,
+						judgeBaseDomain,
+						"web_hint_read_failed",
+						fmt.Sprintf("Web hint collector failed to read %s for %s.", target.Kind, seedLabel),
+						map[string]interface{}{
+							"error":       err.Error(),
+							"target_kind": target.Kind,
+							"target_url":  target.URL,
+						},
+					)
 					continue
 				}
 
@@ -156,12 +238,106 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				case "homepage":
 					err := extractHTMLCandidates(body, addCandidate)
 					if err != nil {
+						stats.parseErrorCount++
 						newErrors = append(newErrors, err)
+						telemetry.Errorf(
+							ctx,
+							"[Web Hint Collector] Failed to parse homepage hints from %s for %s: %v",
+							target.URL,
+							seedLabel,
+							err,
+						)
+						emitWebHintEvent(
+							pCtx,
+							seed,
+							judgeBaseDomain,
+							"web_hint_parse_failed",
+							fmt.Sprintf("Web hint collector failed to parse homepage hints for %s.", seedLabel),
+							map[string]interface{}{
+								"error":       err.Error(),
+								"target_kind": target.Kind,
+								"target_url":  target.URL,
+							},
+						)
 					}
 				case "securitytxt":
-					extractSecurityTXTCandidates(body, addCandidate)
+					err := extractSecurityTXTCandidates(body, addCandidate)
+					if err != nil {
+						stats.parseErrorCount++
+						newErrors = append(newErrors, err)
+						telemetry.Errorf(
+							ctx,
+							"[Web Hint Collector] Failed to parse security.txt hints from %s for %s: %v",
+							target.URL,
+							seedLabel,
+							err,
+						)
+						emitWebHintEvent(
+							pCtx,
+							seed,
+							judgeBaseDomain,
+							"web_hint_parse_failed",
+							fmt.Sprintf("Web hint collector failed to parse security.txt hints for %s.", seedLabel),
+							map[string]interface{}{
+								"error":       err.Error(),
+								"target_kind": target.Kind,
+								"target_url":  target.URL,
+							},
+						)
+					}
 				}
 			}
+		}
+
+		candidateRoots := sortedWebHintCandidateRoots(candidateByRoot)
+		switch len(candidateRoots) {
+		case 0:
+			telemetry.Infof(
+				ctx,
+				"[Web Hint Collector] No cross-root candidates discovered for %s after %d targets (successful=%d skipped=%d errors=%d).",
+				seedLabel,
+				stats.targetCount,
+				stats.successfulFetchCount,
+				stats.skippedStatusCount,
+				stats.errorCount(),
+			)
+			emitWebHintEvent(
+				pCtx,
+				seed,
+				judgeBaseDomain,
+				"web_hint_no_candidates",
+				fmt.Sprintf("Web hint collector found no cross-root candidates for %s.", seedLabel),
+				map[string]interface{}{
+					"candidate_count":        0,
+					"error_count":            stats.errorCount(),
+					"skipped_status_count":   stats.skippedStatusCount,
+					"successful_fetch_count": stats.successfulFetchCount,
+					"target_count":           stats.targetCount,
+				},
+			)
+		default:
+			telemetry.Infof(
+				ctx,
+				"[Web Hint Collector] Discovered %d candidate root(s) for %s: %s",
+				len(candidateRoots),
+				seedLabel,
+				strings.Join(candidateRoots, ", "),
+			)
+			emitWebHintEvent(
+				pCtx,
+				seed,
+				judgeBaseDomain,
+				"web_hint_candidates_discovered",
+				fmt.Sprintf("Web hint collector found %d candidate root(s) for %s.", len(candidateRoots), seedLabel),
+				map[string]interface{}{
+					"candidate_count":        len(candidateRoots),
+					"candidate_roots":        candidateRoots,
+					"error_count":            stats.errorCount(),
+					"skipped_status_count":   stats.skippedStatusCount,
+					"successful_fetch_count": stats.successfulFetchCount,
+					"target_count":           stats.targetCount,
+				},
+			)
 		}
 
 		signalsByRoot := make(map[string][]models.SeedEvidence)
@@ -174,15 +350,42 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				return candidates[i].Root < candidates[j].Root
 			})
 
+			telemetry.Infof(
+				ctx,
+				"[Web Hint Collector] Sending %d candidate root(s) to judge for %s.",
+				len(candidates),
+				seedLabel,
+			)
 			decisions, err := c.judge.EvaluateAnchorRoots(ctx, seed, judgeBaseDomain, candidates)
 			if err != nil {
 				newErrors = append(newErrors, err)
+				telemetry.Errorf(
+					ctx,
+					"[Web Hint Collector] Judge failed for %s with %d candidate root(s): %v",
+					seedLabel,
+					len(candidates),
+					err,
+				)
+				emitWebHintEvent(
+					pCtx,
+					seed,
+					judgeBaseDomain,
+					"web_hint_judge_failed",
+					fmt.Sprintf("Web hint judge failed for %s.", seedLabel),
+					map[string]interface{}{
+						"candidate_count": len(candidates),
+						"candidate_roots": candidateRoots,
+						"error":           err.Error(),
+					},
+				)
 			} else {
 				lineage.RecordWebHintJudgeEvaluation(pCtx, "web_hint_collector", seed, judgeBaseDomain, candidates, decisions)
+				acceptedCount := 0
 				for _, decision := range decisions {
 					if !decision.Collect {
 						continue
 					}
+					acceptedCount++
 					signalsByRoot[decision.Root] = append(signalsByRoot[decision.Root], models.SeedEvidence{
 						Source:     "web_hint_collector",
 						Kind:       decision.Kind,
@@ -191,9 +394,51 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 						Reasoned:   true,
 					})
 				}
+				telemetry.Infof(
+					ctx,
+					"[Web Hint Collector] Judge evaluated %d candidate root(s) for %s: accepted=%d discarded=%d.",
+					len(candidates),
+					seedLabel,
+					acceptedCount,
+					len(candidates)-acceptedCount,
+				)
+				emitWebHintEvent(
+					pCtx,
+					seed,
+					judgeBaseDomain,
+					"web_hint_judge_completed",
+					fmt.Sprintf("Web hint judge evaluated %d candidate root(s) for %s.", len(candidates), seedLabel),
+					map[string]interface{}{
+						"accepted_count":  acceptedCount,
+						"candidate_count": len(candidates),
+						"candidate_roots": candidateRoots,
+						"discarded_count": len(candidates) - acceptedCount,
+					},
+				)
 			}
+		} else if c.judge == nil && len(candidateRoots) > 0 {
+			telemetry.Infof(
+				ctx,
+				"[Web Hint Collector] Judge disabled; %d candidate root(s) for %s will remain unpromoted.",
+				len(candidateRoots),
+				seedLabel,
+			)
+			emitWebHintEvent(
+				pCtx,
+				seed,
+				judgeBaseDomain,
+				"web_hint_candidates_unjudged",
+				fmt.Sprintf("Web hint collector found %d candidate root(s) for %s, but the judge is disabled.", len(candidateRoots), seedLabel),
+				map[string]interface{}{
+					"candidate_count": len(candidateRoots),
+					"candidate_roots": candidateRoots,
+				},
+			)
 		}
 
+		acceptedRoots := make([]string, 0, len(signalsByRoot))
+		lowConfidenceRoots := make([]string, 0, len(signalsByRoot))
+		promotedRoots := make([]string, 0, len(signalsByRoot))
 		for root, evidences := range signalsByRoot {
 			promoted := false
 			accepted := false
@@ -204,6 +449,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 					pCtx.CandidatePromotionConfidenceThreshold(),
 				) {
 					telemetry.Infof(ctx, "[Web Hint Collector] Skipping %s due to low-confidence judge decision %.2f.", root, evidence.Confidence)
+					lowConfidenceRoots = append(lowConfidenceRoots, root)
 					continue
 				}
 				accepted = true
@@ -214,6 +460,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 			if !accepted {
 				continue
 			}
+			acceptedRoots = append(acceptedRoots, root)
 
 			newAssets = append(newAssets, models.Asset{
 				ID:            models.NewID("dom-web-hint"),
@@ -226,8 +473,61 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 			})
 
 			if promoted {
+				promotedRoots = append(promotedRoots, root)
 				telemetry.Infof(ctx, "[Web Hint Collector] Promoted %s from web ownership hints.", root)
 			}
+		}
+
+		sort.Strings(acceptedRoots)
+		sort.Strings(lowConfidenceRoots)
+		sort.Strings(promotedRoots)
+
+		switch {
+		case len(candidateRoots) > 0 && len(acceptedRoots) == 0 && c.judge != nil:
+			emitWebHintEvent(
+				pCtx,
+				seed,
+				judgeBaseDomain,
+				"web_hint_no_accepted_candidates",
+				fmt.Sprintf("Web hint collector accepted no candidate roots for %s.", seedLabel),
+				map[string]interface{}{
+					"candidate_count": len(candidateRoots),
+					"candidate_roots": candidateRoots,
+				},
+			)
+		case len(acceptedRoots) > 0:
+			emitWebHintEvent(
+				pCtx,
+				seed,
+				judgeBaseDomain,
+				"web_hint_candidates_accepted",
+				fmt.Sprintf("Web hint collector accepted %d candidate root(s) for %s.", len(acceptedRoots), seedLabel),
+				map[string]interface{}{
+					"accepted_count": len(acceptedRoots),
+					"accepted_roots": acceptedRoots,
+					"promoted_count": len(promotedRoots),
+					"promoted_roots": promotedRoots,
+				},
+			)
+		}
+
+		if len(lowConfidenceRoots) > 0 {
+			emitWebHintEvent(
+				pCtx,
+				seed,
+				judgeBaseDomain,
+				"web_hint_low_confidence_skipped",
+				fmt.Sprintf(
+					"Web hint collector skipped %d accepted candidate root(s) for %s due to confidence threshold %.2f.",
+					len(lowConfidenceRoots),
+					seedLabel,
+					pCtx.CandidatePromotionConfidenceThreshold(),
+				),
+				map[string]interface{}{
+					"confidence_threshold": pCtx.CandidatePromotionConfidenceThreshold(),
+					"skipped_roots":        lowConfidenceRoots,
+				},
+			)
 		}
 	}
 
@@ -247,7 +547,7 @@ func extractHTMLCandidates(body []byte, addCandidate func(raw, text string)) err
 
 	doc, err := html.Parse(bytes.NewReader(body))
 	if err != nil {
-		return nil
+		return err
 	}
 
 	var walk func(*html.Node)
@@ -290,7 +590,7 @@ func extractHTMLCandidates(body []byte, addCandidate func(raw, text string)) err
 	return nil
 }
 
-func extractSecurityTXTCandidates(body []byte, addCandidate func(raw, text string)) {
+func extractSecurityTXTCandidates(body []byte, addCandidate func(raw, text string)) error {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -312,6 +612,8 @@ func extractSecurityTXTCandidates(body []byte, addCandidate func(raw, text strin
 			addCandidate(value, "securitytxt")
 		}
 	}
+
+	return scanner.Err()
 }
 
 func collectWebHintCandidates(candidateByRoot map[string]*webhint.Candidate, seenSamples map[string]map[string]struct{}, knownRoots map[string]struct{}, raw, text string) {
@@ -369,4 +671,64 @@ func nodeText(node *html.Node) string {
 	}
 	walk(node)
 	return builder.String()
+}
+
+func (s webHintSeedStats) errorCount() int {
+	return s.fetchErrorCount + s.readErrorCount + s.parseErrorCount
+}
+
+// emitWebHintEvent enriches collector diagnostics with stable seed metadata so
+// live activity records can explain why a web-hint stage produced no assets.
+func emitWebHintEvent(
+	pCtx *models.PipelineContext,
+	seed models.Seed,
+	baseDomain string,
+	kind string,
+	message string,
+	extra map[string]interface{},
+) {
+	metadata := map[string]interface{}{
+		"collector":  "web_hint_collector",
+		"seed_id":    strings.TrimSpace(seed.ID),
+		"seed_label": webHintSeedLabel(seed),
+	}
+	if normalizedBase := discovery.NormalizeDomainIdentifier(baseDomain); normalizedBase != "" {
+		metadata["base_domain"] = normalizedBase
+	}
+	for key, value := range extra {
+		metadata[key] = value
+	}
+
+	pCtx.EmitExecutionEvent(models.ExecutionEvent{
+		Kind:     kind,
+		Message:  message,
+		Metadata: metadata,
+	})
+}
+
+func sortedWebHintCandidateRoots(candidateByRoot map[string]*webhint.Candidate) []string {
+	if len(candidateByRoot) == 0 {
+		return nil
+	}
+
+	roots := make([]string, 0, len(candidateByRoot))
+	for root := range candidateByRoot {
+		roots = append(roots, root)
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+func webHintSeedLabel(seed models.Seed) string {
+	if companyName := strings.TrimSpace(seed.CompanyName); companyName != "" {
+		return companyName
+	}
+
+	for _, domain := range seed.Domains {
+		if normalized := discovery.NormalizeDomainIdentifier(domain); normalized != "" {
+			return normalized
+		}
+	}
+
+	return strings.TrimSpace(seed.ID)
 }
