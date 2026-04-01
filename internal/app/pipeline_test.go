@@ -88,6 +88,9 @@ func TestNewPipeline_AssemblesRuntimeAndStages(t *testing.T) {
 	if len(pipeline.engine.Enrichers) != 2 {
 		t.Fatalf("expected 2 enrichers, got %d", len(pipeline.engine.Enrichers))
 	}
+	if len(pipeline.engine.Expanders) != 1 {
+		t.Fatalf("expected 1 expander, got %d", len(pipeline.engine.Expanders))
+	}
 	if len(pipeline.engine.Reconsiderers) != 1 {
 		t.Fatalf("expected 1 reconsiderer, got %d", len(pipeline.engine.Reconsiderers))
 	}

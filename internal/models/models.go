@@ -258,6 +258,7 @@ type PipelineContext struct {
 	Errors                []error `json:"-"`
 	JudgeEvaluations      []JudgeEvaluation
 	DNSVariantSweepLabels []string
+	AISearchExecutedRoots []string
 
 	collectionSeeds               []Seed
 	pendingSeeds                  []Seed
@@ -278,12 +279,13 @@ type PipelineContext struct {
 }
 
 type SchedulerState struct {
-	CollectionSeeds               []Seed `json:"collection_seeds,omitempty"`
-	PendingSeeds                  []Seed `json:"pending_seeds,omitempty"`
-	CollectionDepth               int    `json:"collection_depth"`
-	MaxCollectionDepth            int    `json:"max_collection_depth"`
-	ExtraCollectionWaveReserved   bool   `json:"extra_collection_wave_reserved,omitempty"`
-	ExtraCollectionWaveInProgress bool   `json:"extra_collection_wave_in_progress,omitempty"`
+	CollectionSeeds               []Seed   `json:"collection_seeds,omitempty"`
+	PendingSeeds                  []Seed   `json:"pending_seeds,omitempty"`
+	CollectionDepth               int      `json:"collection_depth"`
+	MaxCollectionDepth            int      `json:"max_collection_depth"`
+	ExtraCollectionWaveReserved   bool     `json:"extra_collection_wave_reserved,omitempty"`
+	ExtraCollectionWaveInProgress bool     `json:"extra_collection_wave_in_progress,omitempty"`
+	AISearchExecutedRoots         []string `json:"ai_search_executed_roots,omitempty"`
 }
 
 type seedCandidate struct {
@@ -385,6 +387,7 @@ func (p *PipelineContext) SnapshotSchedulerState() SchedulerState {
 		MaxCollectionDepth:            p.maxCollectionDepth,
 		ExtraCollectionWaveReserved:   p.extraCollectionWaveReserved,
 		ExtraCollectionWaveInProgress: p.extraCollectionWaveInProgress,
+		AISearchExecutedRoots:         append([]string(nil), p.AISearchExecutedRoots...),
 	}
 }
 
@@ -398,6 +401,7 @@ func (p *PipelineContext) RestoreSchedulerState(state SchedulerState) {
 	p.maxCollectionDepth = state.MaxCollectionDepth
 	p.extraCollectionWaveReserved = state.ExtraCollectionWaveReserved
 	p.extraCollectionWaveInProgress = state.ExtraCollectionWaveInProgress
+	p.AISearchExecutedRoots = append([]string(nil), state.AISearchExecutedRoots...)
 	p.knownSeedKeys = make(map[string]struct{}, len(p.Seeds))
 	for _, seed := range p.Seeds {
 		p.knownSeedKeys[seedKey(seed)] = struct{}{}

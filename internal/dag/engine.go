@@ -29,6 +29,12 @@ type Enricher interface {
 	Node
 }
 
+// Expander evaluates the current wave context and may propose new seeds after
+// enrichment has completed.
+type Expander interface {
+	Node
+}
+
 // Filter removes false positives, dead domains, or out-of-scope assets.
 type Filter interface {
 	Node
@@ -49,6 +55,7 @@ type Exporter interface {
 type Engine struct {
 	Collectors    []Collector
 	Enrichers     []Enricher
+	Expanders     []Expander
 	Reconsiderers []Reconsiderer
 	Filters       []Filter
 	Exporters     []Exporter
@@ -89,9 +96,9 @@ type ResumeCallbacks struct {
 
 var ErrExecutionPaused = errors.New("dag execution paused")
 
-// Allow initial seeds plus two discovered frontiers so roots found in the first
-// follow-up wave still get a collection pass of their own.
-const maxSeedExpansionDepth = 2
+// Allow initial seeds plus three discovered frontiers so roots found in the
+// third follow-up wave still get one normal collection pass of their own.
+const maxSeedExpansionDepth = 3
 
 // Run executes the DAG synchronously for local E2E testing.
 func (e *Engine) Run(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
@@ -244,6 +251,12 @@ func (e *Engine) runWave(ctx context.Context, pCtx *models.PipelineContext, wave
 
 	for _, en := range e.Enrichers {
 		err := e.processNode(ctx, "enrich", wave, en, pCtx)
+		if err != nil {
+			return err
+		}
+	}
+	for _, ex := range e.Expanders {
+		err := e.processNode(ctx, "expand", wave, ex, pCtx)
 		if err != nil {
 			return err
 		}

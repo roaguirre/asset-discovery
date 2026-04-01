@@ -100,6 +100,76 @@ func (e *seedSchedulingEnricher) Process(ctx context.Context, pCtx *models.Pipel
 	return pCtx, nil
 }
 
+type assetProducingEnricher struct{}
+
+func (e *assetProducingEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	pCtx.AppendAssets(models.Asset{
+		ID:            "asset-enriched",
+		EnumerationID: "enum-1",
+		Type:          models.AssetTypeDomain,
+		Identifier:    "portal.example.com",
+		Source:        "domain_enricher",
+		DomainDetails: &models.DomainDetails{},
+	})
+	return pCtx, nil
+}
+
+type assetObservingExpander struct {
+	observed bool
+}
+
+func (e *assetObservingExpander) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	for _, asset := range pCtx.Assets {
+		if asset.Identifier == "portal.example.com" {
+			e.observed = true
+			break
+		}
+	}
+	if e.observed {
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-2",
+			CompanyName: "Portal Example",
+			Domains:     []string{"portal.example.com"},
+		})
+	}
+	return pCtx, nil
+}
+
+// TestEngine_Run_ExpandersRunAfterEnrichers verifies the new expander stage
+// can read same-wave enrichment output and open the next frontier from it.
+func TestEngine_Run_ExpandersRunAfterEnrichers(t *testing.T) {
+	collector := &frontierCollector{}
+	expander := &assetObservingExpander{}
+
+	engine := &dag.Engine{
+		Collectors: []dag.Collector{collector},
+		Enrichers:  []dag.Enricher{&assetProducingEnricher{}},
+		Expanders:  []dag.Expander{expander},
+	}
+
+	resultCtx, err := engine.Run(context.Background(), &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !expander.observed {
+		t.Fatalf("expected expander to observe assets created by the enricher")
+	}
+	if !reflect.DeepEqual(collector.seedsPerCall, []int{1, 1}) {
+		t.Fatalf("expected expander-promoted frontier to trigger a second collector wave, got %v", collector.seedsPerCall)
+	}
+	if len(resultCtx.Seeds) != 2 {
+		t.Fatalf("expected expander-promoted seed to be registered, got %d seed(s)", len(resultCtx.Seeds))
+	}
+}
+
 func TestEngine_Run_UsesFrontierForFollowUpCollection(t *testing.T) {
 	collector := &frontierCollector{}
 	enricher := &seedSchedulingEnricher{}
@@ -185,6 +255,37 @@ func (e *chainedSeedSchedulingEnricher) Process(ctx context.Context, pCtx *model
 	return pCtx, nil
 }
 
+type deepChainedSeedSchedulingEnricher struct {
+	callCount int
+}
+
+func (e *deepChainedSeedSchedulingEnricher) Process(ctx context.Context, pCtx *models.PipelineContext) (*models.PipelineContext, error) {
+	e.callCount++
+
+	switch e.callCount {
+	case 1:
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-2",
+			CompanyName: "ptr.example.com",
+			Domains:     []string{"ptr.example.com"},
+		})
+	case 2:
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-3",
+			CompanyName: "example-store.com",
+			Domains:     []string{"example-store.com"},
+		})
+	case 3:
+		pCtx.EnqueueSeed(models.Seed{
+			ID:          "seed-4",
+			CompanyName: "status.example.net",
+			Domains:     []string{"status.example.net"},
+		})
+	}
+
+	return pCtx, nil
+}
+
 func TestEngine_Run_CollectsLateDiscoveredFollowUpSeed(t *testing.T) {
 	collector := &frontierCollector{}
 	enricher := &chainedSeedSchedulingEnricher{}
@@ -217,6 +318,39 @@ func TestEngine_Run_CollectsLateDiscoveredFollowUpSeed(t *testing.T) {
 
 	if len(resultCtx.Seeds) != 3 {
 		t.Fatalf("expected chained discovered seeds to be registered, got %d seeds", len(resultCtx.Seeds))
+	}
+}
+
+// TestEngine_Run_DefaultDepthAllowsOneMoreNormalWave verifies the normal-wave
+// frontier cap now allows one additional discovered frontier before
+// reconsideration is the only remaining expansion path.
+func TestEngine_Run_DefaultDepthAllowsOneMoreNormalWave(t *testing.T) {
+	collector := &frontierCollector{}
+	enricher := &deepChainedSeedSchedulingEnricher{}
+
+	engine := &dag.Engine{
+		Collectors: []dag.Collector{collector},
+		Enrichers:  []dag.Enricher{enricher},
+	}
+
+	resultCtx, err := engine.Run(context.Background(), &models.PipelineContext{
+		Seeds: []models.Seed{
+			{
+				ID:          "seed-1",
+				CompanyName: "example.com",
+				Domains:     []string{"example.com"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !reflect.DeepEqual(collector.seedsPerCall, []int{1, 1, 1, 1}) {
+		t.Fatalf("expected four normal collection waves after the depth increase, got %v", collector.seedsPerCall)
+	}
+	if len(resultCtx.Seeds) != 4 {
+		t.Fatalf("expected one additional discovered seed to receive its own normal wave, got %d seed(s)", len(resultCtx.Seeds))
 	}
 }
 

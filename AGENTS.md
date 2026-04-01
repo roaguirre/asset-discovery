@@ -1,55 +1,69 @@
 # AGENTS.md
 
-## Information for AI Agents
+This file is the operational guide for AI coding assistants working in this repository. Use [SOUL.md](SOUL.md) for project posture and decision-making bias. Use this file for concrete rules, source-of-truth locations, and workflow expectations.
 
-This file describes how AI coding assistants should interact with this repository.
-See `SOUL.md` for the repository's identity, values, and decision-making posture; use this file for concrete workflow and implementation rules.
+## Read These Docs First
 
-### Core Architecture
+- [README.md](README.md): landing page, entrypoints, and local workflow
+- [ARCHITECTURE.md](ARCHITECTURE.md): stable system boundaries
+- [docs/runtime-model.md](docs/runtime-model.md): canonical runtime state, scheduler semantics, and checkpoints
+- [docs/pipeline-state-machine.md](docs/pipeline-state-machine.md): engine phases, wave ordering, and Mermaid conventions
+- [SOUL.md](SOUL.md): values and architectural posture
 
-- **Language**: Golang 1.25.
-- **Paradigm**: Directed Acyclic Graph (DAG). Stages are intentionally decoupled.
-- **Data Transfer**: Uses `models.PipelineContext` for exchanging state.
-- **Canonical Runtime State**: `PipelineContext.Assets` is the canonical runtime asset set. Raw stage emissions belong in `PipelineContext.Observations`, and discovery / promotion edges belong in `PipelineContext.Relations`.
-- **Extensibility**: Interfaces MUST be used for processing nodes (`Collector`, `Enricher`, `Filter`, `Exporter`) to allow easy replacement with a PubSub/message broker strategy in the future.
-- **Runtime Assembly**: `internal/app/` owns pipeline wiring, shared HTTP clients, judges, exporters, run IDs, and output policy. CLI code should delegate there instead of assembling the DAG directly.
-- **Stage Packaging**: Concrete stage implementations live under `internal/collect/`, `internal/enrich/`, `internal/filter/`, and `internal/export/`.
-- **Tracing Split**: Runtime observability belongs in `internal/tracing/telemetry/`. Exported provenance, judge traces, and result lineage belong in `internal/tracing/lineage/`.
-- **Model Boundary**: `internal/models/` is for pipeline-core state only. Export/view DTOs belong with `internal/export/`, `internal/runservice/`, or `internal/tracing/lineage/`, not `internal/models/`.
+## Working Model
 
-### Workflow Rules
+- Language: Golang 1.25
+- Paradigm: a scheduler-owned DAG with resumable waves
+- Runtime assembly: [`internal/app/`](internal/app/) owns pipeline wiring, judges, shared clients, exporters, run IDs, and output policy
+- Stage packaging: concrete stage families live under [`internal/collect/`](internal/collect/), [`internal/enrich/`](internal/enrich/), [`internal/filter/`](internal/filter/), and [`internal/export/`](internal/export/). The engine also supports dedicated expander stages between enrichment and filtering.
+- Canonical runtime graph:
+  - `PipelineContext.Assets` is the canonical runtime asset set
+  - `PipelineContext.Observations` stores raw per-stage emissions
+  - `PipelineContext.Relations` stores discovery and promotion edges
+- Explainability state:
+  - `PipelineContext.JudgeEvaluations` records judge outcomes for later projection
+  - execution events are emitted through `EmitExecutionEvent` and projected by listeners; they are not stored as a slice on `PipelineContext`
+- Tracing split:
+  - runtime observability belongs in [`internal/tracing/telemetry/`](internal/tracing/telemetry/)
+  - exported provenance and judge lineage belong in [`internal/tracing/lineage/`](internal/tracing/lineage/)
+- Model boundary: [`internal/models/`](internal/models/) is for pipeline-core runtime state only. Export or view DTOs belong with the packages that own those outputs.
 
-1. **Do not break the DAG**: Never make the `Collector` call the `Enricher` directly. Nodes must be scheduled by a central DAG engine or an event system.
-2. **Engine-owned scheduling only**: If an `Enricher` discovers new seeds, it must hand them back to the engine or scheduler layer. Do not let processing nodes control recursion, collection loops, or stage-to-stage orchestration themselves.
-3. **Frontier-based collection**: Follow-up collection waves must process only the active seed frontier, not the full historical seed set, to avoid duplicate collection work.
-4. **Strict Typing**: Ensure all JSON tags are strictly defined and follow idiomatic Go (e.g. `json:"company_name,omitempty"`).
-5. **CI Parity Before Handoff**: Before handing work back, run the same verification path CI runs via `make validate`, not just `go test ./...`. `make validate` currently covers build, tests, vet, and formatting.
-6. **Lock-Safe Snapshots and DTOs**: Do not copy, embed, persist, or pass mutex-bearing runtime structs by value. If a runtime model such as `models.PipelineContext` carries synchronization state, use pointers for live access and define lock-free snapshot / DTO shapes for checkpoints, projections, or exports.
-7. **Local Testing First**: The app must remain operable from a simple local CLI (`cmd/discover/main.go`).
-8. **No Global State**: Avoid `init()` functions that mutate global variables, pass dependencies explicitely.
-9. **Deterministic Parsing vs Ownership Reasoning**: Use deterministic code for protocol parsing, normalization, extraction, deduplication, and other stable mechanical transforms. When the task is to judge ownership, first-party scope, or whether a discovered candidate should be collected or promoted despite ambiguous evidence, prefer an LLM judge over hardcoded heuristics. Heuristics may generate candidates or evidence, but they must not silently make final ownership decisions.
-10. **Runtime-Owned Dependencies**: Shared judges, HTTP clients, telemetry providers, and other high-level dependencies should be assembled in `internal/app/` and injected into stages. Avoid adding new ad hoc construction logic inside stage implementations unless it is strictly local and low-level.
-11. **Telemetry API Only**: Stage packages should emit runtime logging/tracing through `internal/tracing/telemetry/` rather than calling the global `log` package directly.
-12. **Canonical Upserts Only**: When emitting discovered assets or runtime relations, prefer the canonical helper paths on `PipelineContext` instead of direct append patterns. The runtime model relies on those helpers to maintain canonical assets, observations, provenance, and relations consistently.
-13. **Enrich Canonical Assets**: Enrichers should iterate canonical assets and use per-stage enrichment state for cache / retry decisions. A new observation or contributor should add provenance, not force duplicate network work by default.
-14. **Live Activity Must Explain Silent States**: When a stage can no-op because optional runtime configuration is missing, emit an explicit live execution event so the web Activity view explains that behavior without requiring Cloud Run log access.
+## Non-Negotiable Rules
 
-### Local Dev
+1. Do not let stages orchestrate other stages. Collectors, enrichers, expanders, filters, reconsiderers, and exporters are scheduled by the engine.
+2. Keep frontier expansion scheduler-owned. If a stage discovers seeds, hand them back through `PipelineContext` helper paths instead of recursing directly.
+3. Follow-up collection waves must consume only the active frontier. Do not re-run the full historical seed set by default.
+4. Use canonical upsert helpers on `PipelineContext` for assets, observations, and relations. Do not hand-roll append logic that bypasses canonical identity, provenance, or relation resolution.
+5. Enrich canonical assets. New evidence should usually add provenance or enrichment state, not trigger duplicate network work automatically.
+6. Treat `PipelineContext` as live mutex-bearing state. Use pointers for live access and lock-safe snapshot or DTO shapes for checkpoints, projections, and exports.
+7. Keep runtime-owned dependencies in [`internal/app/`](internal/app/). Avoid ad hoc construction of judges, shared HTTP clients, or telemetry providers inside stage packages.
+8. Use deterministic code for protocol parsing, normalization, extraction, and deduplication. Use judges for ambiguous ownership or promotion decisions instead of silently widening scope with heuristics.
+9. Emit runtime observability through [`internal/tracing/telemetry/`](internal/tracing/telemetry/), not through new direct logging patterns inside stage packages.
+10. When optional configuration causes a stage to no-op, emit an execution event so the live Activity view explains the silent state.
+11. Keep the CLI path viable. Structural changes should still work from [`cmd/discover/main.go`](cmd/discover/main.go), not only through the live server.
+12. Before handoff, run `make validate`. That is the repository's CI-parity verification path.
+
+## Local Workflow
 
 - Preferred local server command: `make server`
-- Copy `.env.example` to `.env.local` for local server configuration
 - `make server` loads `.env.local` before running `go run ./cmd/server`
 - Primary verification command: `make validate`
 - Faster iteration command: `go test ./...`
-- `make validate` mirrors CI and may rewrite files via `go fmt ./...`; check the working tree after it completes
 - Firestore emulator coverage: `make test-firebase`
-- `make test-firebase` uses the Firestore emulator port from the sibling `asset-discovery-web/firebase.json`; stop anything already bound to that port before running it
+- `make validate` may rewrite tracked Go files through `go fmt ./...`; inspect the working tree after it completes
 
-### Adding New Stages
+## Stage And Model Changes
 
-To add a new stage to the DAG:
+When adding or changing pipeline behavior:
 
-1. Define its structs in `internal/models/`.
-2. Implement the `Node` interface in the stage package that matches the concern:
-   `internal/collect/`, `internal/enrich/`, `internal/filter/`, or `internal/export/`.
-3. Register it in `internal/app/` so runtime assembly stays centralized.
+1. Put pipeline-core runtime state in [`internal/models/`](internal/models/) only if it is truly part of the live runtime graph or scheduler state.
+2. Implement the appropriate interface in the stage package that owns the concern.
+3. Register stage wiring in [`internal/app/`](internal/app/) so runtime assembly stays centralized.
+4. Put export-facing, projection-facing, or lineage-facing DTOs in the package that owns those outputs instead of inflating `internal/models/`.
+
+## Design Bias
+
+- Prefer deep modules with narrow interfaces.
+- Reduce complexity before adding flexibility.
+- Write comments for non-obvious intent, not for obvious mechanics.
+- Keep provenance, ownership reasoning, and runtime state boundaries explainable.

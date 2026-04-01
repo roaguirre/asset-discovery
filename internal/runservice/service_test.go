@@ -374,6 +374,36 @@ func TestHydratePivotsFromJudges_ManualLowConfidenceDiscardCreatesReviewablePivo
 	}
 }
 
+// TestBuildProjectedJudgeSummary_PreservesAISearchCollector verifies the live
+// judge projection keeps the new collector identifier intact for pivot and
+// audit views.
+func TestBuildProjectedJudgeSummary_PreservesAISearchCollector(t *testing.T) {
+	pCtx := &models.PipelineContext{}
+	pCtx.RecordJudgeEvaluation(models.JudgeEvaluation{
+		Collector: "ai_search_collector",
+		SeedID:    "seed-1",
+		Scenario:  "AI web search expansion from example.com",
+		Outcomes: []models.JudgeCandidateOutcome{
+			{
+				Root:    "example-security.com",
+				Collect: true,
+			},
+			{
+				Root:    "example-old.com",
+				Collect: false,
+			},
+		},
+	})
+
+	summary := buildProjectedJudgeSummary(pCtx)
+	if summary.EvaluationCount != 1 || summary.AcceptedCount != 1 || summary.DiscardedCount != 1 {
+		t.Fatalf("expected projected summary counts to include AI search outcomes, got %+v", summary)
+	}
+	if len(summary.Groups) != 1 || summary.Groups[0].Collector != "ai_search_collector" {
+		t.Fatalf("expected projected group collector to be preserved, got %+v", summary.Groups)
+	}
+}
+
 func TestService_ProcessRun_PausesForManualReviewAndResumes(t *testing.T) {
 	artifactStore := &capturingArtifactStore{
 		published: export.Downloads{

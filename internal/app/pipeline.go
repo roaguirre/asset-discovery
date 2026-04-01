@@ -12,11 +12,13 @@ import (
 	"asset-discovery/internal/collect"
 	"asset-discovery/internal/dag"
 	"asset-discovery/internal/enrich"
+	"asset-discovery/internal/expand"
 	"asset-discovery/internal/export"
 	"asset-discovery/internal/filter"
 	"asset-discovery/internal/models"
 	"asset-discovery/internal/ownership"
 	"asset-discovery/internal/reconsider"
+	"asset-discovery/internal/search"
 	"asset-discovery/internal/tracing/telemetry"
 	"asset-discovery/internal/webhint"
 )
@@ -65,9 +67,16 @@ func NewPipeline(cfg Config) (*Pipeline, error) {
 	standardClient := &http.Client{Timeout: 30 * time.Second}
 	archiveClient := &http.Client{Timeout: 60 * time.Second}
 	dnsRDAPClient := &http.Client{Timeout: 10 * time.Second}
+	searchClient := &http.Client{Timeout: 45 * time.Second}
 
 	ownershipJudge := ownership.NewDefaultJudge()
 	webHintJudge := webhint.NewDefaultJudge()
+	searchProvider, err := search.NewProviderFromEnv(
+		search.WithOpenAIClient(searchClient),
+	)
+	if err != nil {
+		log.Printf("AI search provider disabled: %v", err)
+	}
 
 	exporters, err := BuildExporters(outputs, resolvedRunID)
 	if err != nil {
@@ -112,6 +121,12 @@ func NewPipeline(cfg Config) (*Pipeline, error) {
 				enrich.WithDomainEnricherRDAPClient(dnsRDAPClient),
 			),
 			enrich.NewIPEnricher(enrich.WithIPEnricherJudge(ownershipJudge)),
+		},
+		Expanders: []dag.Expander{
+			expand.NewAISearchCollector(
+				expand.WithAISearchProvider(searchProvider),
+				expand.WithAISearchJudge(ownershipJudge),
+			),
 		},
 		Reconsiderers: []dag.Reconsiderer{
 			reconsider.NewDiscardedCandidateReconsiderer(

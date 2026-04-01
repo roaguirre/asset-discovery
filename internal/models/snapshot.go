@@ -15,6 +15,7 @@ func (p *PipelineContext) SnapshotReadModel() *PipelineContext {
 		Relations:             cloneRelations(p.Relations),
 		JudgeEvaluations:      cloneJudgeEvaluations(p.JudgeEvaluations),
 		DNSVariantSweepLabels: append([]string(nil), p.DNSVariantSweepLabels...),
+		AISearchExecutedRoots: append([]string(nil), p.AISearchExecutedRoots...),
 	}
 }
 

@@ -57,6 +57,7 @@ func TestPipelineContext_SnapshotReadModelClonesNestedState(t *testing.T) {
 			},
 		},
 		DNSVariantSweepLabels: []string{"zerofox"},
+		AISearchExecutedRoots: []string{"example.com"},
 	}
 
 	snapshot := pCtx.SnapshotReadModel()
@@ -70,6 +71,7 @@ func TestPipelineContext_SnapshotReadModelClonesNestedState(t *testing.T) {
 	pCtx.JudgeEvaluations[0].SeedDomains[0] = "changed.zerofox.com"
 	pCtx.JudgeEvaluations[0].Outcomes[0].Support[0] = "changed support"
 	pCtx.DNSVariantSweepLabels[0] = "changed"
+	pCtx.AISearchExecutedRoots[0] = "changed.example.com"
 
 	if got := snapshot.Seeds[0].Domains[0]; got != "zerofox.com" {
 		t.Fatalf("expected snapshot seed domain to remain unchanged, got %q", got)
@@ -97,5 +99,8 @@ func TestPipelineContext_SnapshotReadModelClonesNestedState(t *testing.T) {
 	}
 	if got := snapshot.DNSVariantSweepLabels[0]; got != "zerofox" {
 		t.Fatalf("expected snapshot variant sweep labels to remain unchanged, got %q", got)
+	}
+	if got := snapshot.AISearchExecutedRoots[0]; got != "example.com" {
+		t.Fatalf("expected snapshot AI search cache to remain unchanged, got %q", got)
 	}
 }

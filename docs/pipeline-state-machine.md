@@ -1,148 +1,133 @@
 # Pipeline State Machine
 
+The source of truth for execution order is [`internal/dag/engine.go`](../internal/dag/engine.go). These diagrams intentionally use a conservative Mermaid subset so they render reliably in GitHub-flavored Markdown.
+
 ## Engine State Machine
 
-The DAG engine (`internal/dag/engine.go`) is a resumable state machine driven by `RunPhase`.
-Checkpoints allow the server to pause execution (e.g. for human-in-the-loop pivot review) and resume later.
+The engine is resumable. Checkpoints let the live server pause after major boundaries such as wave completion or reconsideration.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> WaveGroup : InitializeSeedFrontier
-
-    state "Wave N" as WaveGroup {
-        [*] --> CollectionWave
-        CollectionWave --> AdvanceFrontier : checkpoint
-        AdvanceFrontier --> CollectionWave : frontier has new seeds\n(wave++)
-        AdvanceFrontier --> [*] : frontier exhausted
-    }
-
-    WaveGroup --> Reconsideration
-
+    [*] --> CollectionWave : initialize frontier
+    CollectionWave --> AdvanceFrontier : checkpoint
+    AdvanceFrontier --> CollectionWave : next wave
+    AdvanceFrontier --> Reconsideration : frontier exhausted
     Reconsideration --> AdvanceExtraWave : checkpoint
-    AdvanceExtraWave --> ExtraWave : frontier has seeds\n(wave++)
-    AdvanceExtraWave --> Filtering : frontier empty
-
+    AdvanceExtraWave --> ExtraWave : final frontier ready
+    AdvanceExtraWave --> Filtering : no final frontier
     ExtraWave --> Filtering : checkpoint
-
     Filtering --> Exporting
     Exporting --> Completed
     Completed --> [*]
 ```
 
-## What Happens Inside Each Wave (`runWave`)
+Notes:
 
-Each collection wave runs collectors in parallel, then enrichers sequentially.
+- `AdvanceFrontier` increments the wave number before the next collection pass.
+- `AdvanceExtraWave` can open at most one bounded extra frontier after reconsideration.
+- If the extra frontier is empty, the engine proceeds directly to filtering and export.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Collectors
+## What Happens Inside Each Wave
 
-    state "Collectors (parallel)" as Collectors {
-        state fork_collectors <<fork>>
-        state join_collectors <<join>>
-
-        [*] --> fork_collectors
-
-        fork_collectors --> DNS
-        fork_collectors --> CrtSh
-        fork_collectors --> RDAP
-        fork_collectors --> ReverseRegistration
-        fork_collectors --> HackerTarget
-        fork_collectors --> AlienVault
-        fork_collectors --> Wayback
-        fork_collectors --> ASNCIDR
-        fork_collectors --> Sitemap
-        fork_collectors --> Crawler
-        fork_collectors --> WebHint
-
-        DNS --> join_collectors
-        CrtSh --> join_collectors
-        RDAP --> join_collectors
-        ReverseRegistration --> join_collectors
-        HackerTarget --> join_collectors
-        AlienVault --> join_collectors
-        Wayback --> join_collectors
-        ASNCIDR --> join_collectors
-        Sitemap --> join_collectors
-        Crawler --> join_collectors
-        WebHint --> join_collectors
-
-        join_collectors --> [*]
-    }
-
-    Collectors --> Enrichers
-
-    state "Enrichers (sequential)" as Enrichers {
-        [*] --> DomainEnricher
-        DomainEnricher --> IPEnricher : creates IP assets
-        IPEnricher --> [*]
-    }
-
-    Enrichers --> [*]
-
-    note right of Enrichers
-        DomainEnricher resolves domains (DNS + RDAP)
-        and creates new IP assets.
-        IPEnricher must see those IPs, so it runs second.
-    end note
-```
-
-## Enricher Dependency Detail
-
-```mermaid
-stateDiagram-v2
-    state "DomainEnricher" as DE {
-        state "Read domain assets" as DE_Read
-        state "DNS lookups (32 workers)" as DE_DNS
-        state "RDAP lookups" as DE_RDAP
-        state "Create IP assets" as DE_CreateIP
-        state "Mutate domain assets\n(Records, RDAP, EnrichmentState)" as DE_Mutate
-
-        [*] --> DE_Read
-        DE_Read --> DE_DNS
-        DE_RDAP --> DE_Mutate
-        DE_DNS --> DE_CreateIP
-        DE_CreateIP --> DE_RDAP
-        DE_Mutate --> [*]
-    }
-
-    state "IPEnricher" as IE {
-        state "Read IP assets\n(including DomainEnricher-created)" as IE_Read
-        state "PTR lookups (50 workers)" as IE_PTR
-        state "ASN lookups (Cymru DNS)" as IE_ASN
-        state "Ownership classification" as IE_Own
-        state "Mutate IP assets\n(PTR, ASN, Org, OwnershipState)" as IE_Mutate
-
-        state fork_ip <<fork>>
-        state join_ip <<join>>
-
-        [*] --> IE_Read
-        IE_Read --> fork_ip
-        fork_ip --> IE_PTR
-        fork_ip --> IE_ASN
-        IE_PTR --> join_ip
-        IE_ASN --> join_ip
-        join_ip --> IE_Own
-        IE_Own --> IE_Mutate
-        IE_Mutate --> [*]
-    }
-
-    DE --> IE : IP assets must be\nvisible before IPEnricher reads
-```
-
-## DNS Collector Internal Concurrency (after optimization)
+Collectors run in parallel. Enrichers and expanders then run in order so later stages can see the canonical state created earlier in the wave.
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> BaseDomains[Base Domain Resolution - parallel 32 workers]
-    BaseDomains --> DomainFanout{Per domain parallel fan-out}
-    DomainFanout --> ObserveDomain[observeDomain]
-    DomainFanout --> LookupRDAP[lookupRDAP]
-    ObserveDomain --> DNSFanout[A/AAAA, MX, TXT, NS, and CNAME lookups in parallel]
-    DNSFanout --> JoinDomain[Merge per-domain results]
-    LookupRDAP --> JoinDomain
-    JoinDomain --> MergeResults[Merge Results]
-    MergeResults --> VariantSweep[Variant Sweep - parallel 32 workers]
-    VariantSweep --> JudgeEvaluation[Judge Evaluation]
-    JudgeEvaluation --> End([End])
+    Start([Wave starts]) --> Collectors
+
+    subgraph Collectors["Collectors run in parallel"]
+        DNS["DNS"]
+        CrtSh["crt.sh"]
+        RDAP["RDAP"]
+        ReverseRegistration["Reverse registration"]
+        HackerTarget["HackerTarget"]
+        AlienVault["AlienVault"]
+        Wayback["Wayback"]
+        ASNCIDR["ASN and CIDR"]
+        Sitemap["Sitemap"]
+        Crawler["Crawler"]
+        WebHint["Web hint"]
+    end
+
+    Collectors --> DomainEnricher["Domain enricher"]
+    DomainEnricher --> IPEnricher["IP enricher"]
+
+    subgraph Expanders["Expanders run in order"]
+        AISearch["AI search expander"]
+    end
+
+    IPEnricher --> AISearch
+    AISearch --> End([Wave completes])
 ```
+
+Notes:
+
+- The stage set is assembled in [`internal/app/pipeline.go`](../internal/app/pipeline.go).
+- Collector failures are recorded on the runtime context so one collector panic does not automatically abort the whole wave.
+- Enrichers and expanders are intentionally ordered, not parallelized together.
+
+## Enricher Dependency Detail
+
+The important dependency is that `IPEnricher` must read canonical IP assets after `DomainEnricher` has had a chance to create them.
+
+```mermaid
+flowchart LR
+    subgraph DomainEnricher["DomainEnricher"]
+        DERead["Read canonical domains"] --> DEDNS["DNS lookups"]
+        DEDNS --> DECreateIP["Create IP assets"]
+        DECreateIP --> DERDAP["RDAP lookups"]
+        DERDAP --> DEMutate["Update canonical domain assets"]
+    end
+
+    subgraph IPEnricher["IPEnricher"]
+        IERead["Read canonical IPs"] --> IEFork{"Parallel lookups"}
+        IEFork --> IEPTR["PTR lookups"]
+        IEFork --> IEASN["ASN lookups"]
+        IEPTR --> IEJoin["Join results"]
+        IEASN --> IEJoin
+        IEJoin --> IEOwn["Ownership classification"]
+        IEOwn --> IEMutate["Update canonical IP assets"]
+    end
+
+    DEMutate --> IERead
+```
+
+Notes:
+
+- `DomainEnricher` mutates canonical domain assets and may create new canonical IP assets in the same wave.
+- `IPEnricher` performs PTR and ASN work in parallel internally, then joins those results before mutating canonical IP state.
+- The dependency is on canonical visibility, not on direct stage-to-stage calls.
+
+## DNS Collector Internal Concurrency
+
+The DNS collector uses nested concurrency: a base worker pool across domains, plus parallel lookups inside each domain task.
+
+```mermaid
+flowchart TD
+    Start([Start]) --> Base["Base domain resolution"]
+    Base --> Fanout{"Per-domain fan-out"}
+    Fanout --> Observe["observeDomain"]
+    Fanout --> LookupRDAP["lookupRDAP"]
+    Observe --> DNS["Parallel DNS record lookups"]
+    DNS --> Join["Merge per-domain result"]
+    LookupRDAP --> Join
+    Join --> Merge["Merge collector result"]
+    Merge --> Sweep["Variant sweep"]
+    Sweep --> Judge["Judge evaluation"]
+    Judge --> End([End])
+```
+
+Notes:
+
+- Base domain resolution and variant sweep use the collector worker pool.
+- Per-domain DNS record lookups run in parallel for `A`, `AAAA`, `MX`, `TXT`, `NS`, and `CNAME`.
+- Judge evaluation happens after the collector has merged the domain-level evidence it gathered.
+
+## Mermaid Authoring Note
+
+GitHub Markdown is the compatibility baseline for diagrams in this repository.
+
+- Do not use raw `\n` inside node labels or edge labels.
+- Prefer short labels and move detail into the surrounding prose.
+- Use quoted or bracketed labels when punctuation makes Mermaid parsing fragile.
+- If a diagram becomes text-heavy, simplify the diagram and explain the nuance below it.
