@@ -321,6 +321,53 @@ func TestDNSCollector_RecordsExactLookupErrors(t *testing.T) {
 	}
 }
 
+// TestDNSCollector_RecordsAllExactLookupErrorsAcrossParallelLookups ensures the
+// parallel exact-domain observation path preserves every lookup error instead of
+// dropping failures from one of the concurrent record-type workers.
+func TestDNSCollector_RecordsAllExactLookupErrorsAcrossParallelLookups(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+
+	resolver.setLookupError("A/AAAA", "example.com", errors.New("ip lookup failed"))
+	resolver.setLookupError("MX", "example.com", errors.New("mx lookup failed"))
+	resolver.setLookupError("TXT", "example.com", errors.New("txt lookup failed"))
+	resolver.setLookupError("NS", "example.com", errors.New("ns lookup failed"))
+	resolver.setLookupError("CNAME", "example.com", errors.New("cname lookup failed"))
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.judge = nil
+	collector.variantSweepMode = DNSVariantSweepModePrioritized
+	collector.maxVariantProbesPerRoot = 0
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to complete with recorded errors, got %v", err)
+	}
+
+	for _, want := range []string{
+		"lookup A/AAAA example.com",
+		"lookup MX example.com",
+		"lookup TXT example.com",
+		"lookup NS example.com",
+		"lookup CNAME example.com",
+	} {
+		if !containsErrorSubstring(pCtx.Errors, want) {
+			t.Fatalf("expected lookup error %q to be recorded, got %+v", want, pCtx.Errors)
+		}
+	}
+}
+
 func TestDNSCollector_VariantPreflightNXDOMAINSkipsOtherLookups(t *testing.T) {
 	collector := NewDNSCollector()
 	resolver := newDNSCollectorTestResolver()
@@ -406,6 +453,49 @@ func TestDNSCollector_VariantPreflightTransientNSErrorFallsBackToFullObservation
 	}
 	if resolver.lookupCountByKind("NS", "example.net") < 2 {
 		t.Fatalf("expected transient NS preflight to fall back to the full observation path, got %d NS lookups", resolver.lookupCountByKind("NS", "example.net"))
+	}
+}
+
+// TestDNSCollector_VariantPreflightSuccessfulNSLookupIsReused ensures a
+// successful NS preflight feeds the full variant observation without issuing a
+// second NS lookup for the same candidate root.
+func TestDNSCollector_VariantPreflightSuccessfulNSLookupIsReused(t *testing.T) {
+	collector := NewDNSCollector()
+	resolver := newDNSCollectorTestResolver()
+	resolver.ips["example.com"] = []string{"203.0.113.10"}
+	resolver.ns["example.com"] = []string{"ns1.example.com"}
+
+	resolver.ips["example.net"] = []string{"203.0.113.10"}
+	resolver.ns["example.net"] = []string{"ns1.example.com"}
+
+	collector.lookupIPs = resolver.lookupIPs
+	collector.lookupMX = resolver.lookupMX
+	collector.lookupNS = resolver.lookupNS
+	collector.lookupTXT = resolver.lookupTXT
+	collector.lookupCNAME = resolver.lookupCNAME
+	collector.lookupRDAP = resolver.lookupRDAP
+	collector.judge = nil
+	collector.variantSuffixes = []string{"com", "net"}
+	collector.variantProbeBatchSize = 1
+
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to complete after NS preflight reuse, got %v", err)
+	}
+
+	if resolver.lookupCountByKind("NS", "example.net") != 1 {
+		t.Fatalf("expected successful NS preflight to be reused for example.net, got %d NS lookups", resolver.lookupCountByKind("NS", "example.net"))
+	}
+	for _, kind := range []string{"A/AAAA", "MX", "TXT", "CNAME"} {
+		if resolver.lookupCountByKind(kind, "example.net") != 1 {
+			t.Fatalf("expected one %s lookup during full observation after NS preflight reuse, got %d", kind, resolver.lookupCountByKind(kind, "example.net"))
+		}
 	}
 }
 

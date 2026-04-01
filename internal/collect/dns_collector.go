@@ -286,35 +286,78 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 		candidateByRoot := make(map[string]*dnsPivotCandidate)
 
 		telemetry.Infof(ctx, "[DNS Collector] Resolving domains for seed: %s", seed.CompanyName)
-		for _, baseDomain := range seed.Domains {
-			baseDomain = discovery.NormalizeDomainIdentifier(baseDomain)
-			if baseDomain == "" {
-				continue
-			}
 
-			observation, lookupIssues := c.observeDomain(ctx, baseDomain)
-			for _, issue := range lookupIssues {
+		// Resolve all base domains concurrently (Steps 2+3).
+		type baseDomainResult struct {
+			domain      string
+			observation dnsObservation
+			issues      []dnsLookupIssue
+			rdap        *models.RDAPData
+			rdapErr     error
+		}
+
+		domains := make([]string, 0, len(seed.Domains))
+		for _, d := range seed.Domains {
+			d = discovery.NormalizeDomainIdentifier(d)
+			if d != "" {
+				domains = append(domains, d)
+			}
+		}
+
+		results := make([]baseDomainResult, len(domains))
+		var domWG sync.WaitGroup
+		domSem := make(chan struct{}, maxInt(1, c.variantProbeConcurrency))
+
+		for i, domain := range domains {
+			domWG.Add(1)
+			domSem <- struct{}{}
+			go func(idx int, bd string) {
+				defer domWG.Done()
+				defer func() { <-domSem }()
+
+				var r baseDomainResult
+				r.domain = bd
+				baseRoot := discovery.RegistrableDomain(bd)
+
+				// Fire DNS observation and RDAP lookup concurrently.
+				var innerWG sync.WaitGroup
+				innerWG.Add(2)
+				go func() {
+					defer innerWG.Done()
+					r.observation, r.issues = c.observeDomain(ctx, bd)
+				}()
+				go func() {
+					defer innerWG.Done()
+					r.rdap, r.rdapErr = c.lookupRDAPWithTimeout(ctx, baseRoot)
+				}()
+				innerWG.Wait()
+
+				results[idx] = r
+			}(i, domain)
+		}
+		domWG.Wait()
+
+		// Merge results sequentially to preserve deterministic ordering.
+		for _, r := range results {
+			for _, issue := range r.issues {
 				err := issue.asError()
 				telemetry.Infof(ctx, "[DNS Collector] %v", err)
 				newErrors = append(newErrors, err)
 			}
-			baseRoot := discovery.RegistrableDomain(baseDomain)
-
-			rdapData, err := c.lookupRDAPWithTimeout(ctx, baseRoot)
-			if err != nil && err != registration.ErrUnsupportedRegistrationData {
-				newErrors = append(newErrors, err)
+			if r.rdapErr != nil && r.rdapErr != registration.ErrUnsupportedRegistrationData {
+				newErrors = append(newErrors, r.rdapErr)
 			}
 
-			baseline.addObservation(baseDomain, observation, rdapData)
+			baseline.addObservation(r.domain, r.observation, r.rdap)
 
 			baseAssetID := ""
-			if len(observation.records) > 0 {
-				baseAsset := domainAssetFromObservation(models.NewID("dom"), enum.ID, baseDomain, "dns_collector", observation, nil)
+			if len(r.observation.records) > 0 {
+				baseAsset := domainAssetFromObservation(models.NewID("dom"), enum.ID, r.domain, "dns_collector", r.observation, nil)
 				baseAssetID = baseAsset.ID
 				newAssets = append(newAssets, baseAsset)
 			}
 
-			for _, ip := range observation.ips {
+			for _, ip := range r.observation.ips {
 				observationID := models.NewID("ip")
 				newAssets = append(newAssets, models.Asset{
 					ID:              observationID,
@@ -324,15 +367,15 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 					Source:          "dns_collector",
 					DiscoveryDate:   time.Now(),
 					OwnershipState:  models.OwnershipStateAssociatedInfrastructure,
-					InclusionReason: "Resolved from " + baseDomain + " via DNS",
+					InclusionReason: "Resolved from " + r.domain + " via DNS",
 					IPDetails:       &models.IPDetails{},
 				})
-				for _, relationKind := range dnsIPRelationKinds(observation, ip) {
+				for _, relationKind := range dnsIPRelationKinds(r.observation, ip) {
 					newRelations = append(newRelations, models.AssetRelation{
 						ID:             models.NewID("rel-dns-ip"),
 						FromAssetID:    baseAssetID,
 						FromAssetType:  models.AssetTypeDomain,
-						FromIdentifier: baseDomain,
+						FromIdentifier: r.domain,
 						ToAssetType:    models.AssetTypeIP,
 						ToIdentifier:   ip,
 						ObservationID:  observationID,
@@ -340,22 +383,22 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 						Source:         "dns_collector",
 						Kind:           relationKind,
 						Label:          "Resolved IP",
-						Reason:         "Resolved from " + baseDomain + " via DNS",
+						Reason:         "Resolved from " + r.domain + " via DNS",
 						DiscoveryDate:  time.Now(),
 					})
 				}
 			}
 
-			for _, candidate := range observation.domainCandidates() {
+			for _, candidate := range r.observation.domainCandidates() {
 				if candidate.root == "" {
 					continue
 				}
 
 				if _, inScope := baseline.seedRoots[candidate.root]; inScope {
-					if candidate.host != "" && candidate.host != baseDomain {
+					if candidate.host != "" && candidate.host != r.domain {
 						hostAssetID := models.NewID("dom-dns-host")
 						relationKind := dnsCandidateRelationKind(candidate.sourceKind)
-						reason := "Observed from " + baseDomain + " via " + relationKind
+						reason := "Observed from " + r.domain + " via " + relationKind
 						newAssets = append(newAssets, models.Asset{
 							ID:              hostAssetID,
 							EnumerationID:   enum.ID,
@@ -371,7 +414,7 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 							ID:             models.NewID("rel-dns-host"),
 							FromAssetID:    baseAssetID,
 							FromAssetType:  models.AssetTypeDomain,
-							FromIdentifier: baseDomain,
+							FromIdentifier: r.domain,
 							ToAssetID:      hostAssetID,
 							ToAssetType:    models.AssetTypeDomain,
 							ToIdentifier:   candidate.host,
@@ -711,14 +754,67 @@ func (c *DNSCollector) observeDomainWithNS(ctx context.Context, domain string, p
 		domain: domain,
 		root:   discovery.RegistrableDomain(domain),
 	}
+
+	// Each goroutine writes to its own variables — no mutex needed.
+	var (
+		ips      []string
+		ipErr    error
+		mxs      []*net.MX
+		mxErr    error
+		txts     []string
+		txtErr   error
+		nss      []*net.NS
+		nsErr    error
+		cnameV   string
+		cnameErr error
+	)
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ips, ipErr = c.lookupIPsWithTimeout(ctx, domain)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		mxs, mxErr = c.lookupMXWithTimeout(ctx, domain)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		txts, txtErr = c.lookupTXTWithTimeout(ctx, domain)
+	}()
+
+	if hasPreloadedNS {
+		nss = preloadedNS
+	} else {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			nss, nsErr = c.lookupNSWithTimeout(ctx, domain)
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cnameV, cnameErr = c.lookupCNAMEWithTimeout(ctx, domain)
+	}()
+
+	wg.Wait()
+
+	// Assemble observation from parallel results.
 	lookupIssues := make([]dnsLookupIssue, 0, 5)
 
-	ips, err := c.lookupIPsWithTimeout(ctx, domain)
-	if err != nil {
+	if ipErr != nil {
 		lookupIssues = append(lookupIssues, dnsLookupIssue{
 			recordKind: "A/AAAA",
 			domain:     domain,
-			err:        err,
+			err:        ipErr,
 		})
 	}
 	for _, ip := range ips {
@@ -736,12 +832,11 @@ func (c *DNSCollector) observeDomainWithNS(ctx context.Context, domain string, p
 		observation.live = true
 	}
 
-	mxs, err := c.lookupMXWithTimeout(ctx, domain)
-	if err != nil {
+	if mxErr != nil {
 		lookupIssues = append(lookupIssues, dnsLookupIssue{
 			recordKind: "MX",
 			domain:     domain,
-			err:        err,
+			err:        mxErr,
 		})
 	}
 	for _, mx := range mxs {
@@ -759,12 +854,11 @@ func (c *DNSCollector) observeDomainWithNS(ctx context.Context, domain string, p
 		observation.live = true
 	}
 
-	txts, err := c.lookupTXTWithTimeout(ctx, domain)
-	if err != nil {
+	if txtErr != nil {
 		lookupIssues = append(lookupIssues, dnsLookupIssue{
 			recordKind: "TXT",
 			domain:     domain,
-			err:        err,
+			err:        txtErr,
 		})
 	}
 	for _, txt := range txts {
@@ -779,17 +873,12 @@ func (c *DNSCollector) observeDomainWithNS(ctx context.Context, domain string, p
 		})
 	}
 
-	nss := preloadedNS
-	if !hasPreloadedNS {
-		var err error
-		nss, err = c.lookupNSWithTimeout(ctx, domain)
-		if err != nil {
-			lookupIssues = append(lookupIssues, dnsLookupIssue{
-				recordKind: "NS",
-				domain:     domain,
-				err:        err,
-			})
-		}
+	if nsErr != nil {
+		lookupIssues = append(lookupIssues, dnsLookupIssue{
+			recordKind: "NS",
+			domain:     domain,
+			err:        nsErr,
+		})
 	}
 	for _, ns := range nss {
 		host := discovery.NormalizeDomainIdentifier(ns.Host)
@@ -806,20 +895,19 @@ func (c *DNSCollector) observeDomainWithNS(ctx context.Context, domain string, p
 		observation.live = true
 	}
 
-	cname, err := c.lookupCNAMEWithTimeout(ctx, domain)
-	if err != nil {
+	if cnameErr != nil {
 		lookupIssues = append(lookupIssues, dnsLookupIssue{
 			recordKind: "CNAME",
 			domain:     domain,
-			err:        err,
+			err:        cnameErr,
 		})
 	}
-	cname = discovery.NormalizeDomainIdentifier(cname)
-	if cname != "" && cname != domain {
-		observation.cname = cname
+	cnameV = discovery.NormalizeDomainIdentifier(cnameV)
+	if cnameV != "" && cnameV != domain {
+		observation.cname = cnameV
 		observation.records = append(observation.records, models.DNSRecord{
 			Type:  "CNAME",
-			Value: cname,
+			Value: cnameV,
 		})
 	}
 
