@@ -208,24 +208,27 @@ func (c *ASNCIDRCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				continue
 			}
 
-			newAssets = append(newAssets, models.Asset{
-				ID:            models.NewID("dom-asn-cidr-root"),
-				EnumerationID: enum.ID,
-				Type:          models.AssetTypeDomain,
-				Identifier:    decision.Root,
-				Source:        "asn_cidr_collector",
-				DiscoveryDate: time.Now(),
-				DomainDetails: &models.DomainDetails{},
-			})
-
 			candidate := discovery.BuildDiscoveredSeed(seed, decision.Root, "asn-cidr-pivot")
-			if pCtx.EnqueueSeedCandidate(candidate, models.SeedEvidence{
+			promotion := pCtx.PromoteSeedCandidate(candidate, models.SeedEvidence{
 				Source:     "ownership_judge",
 				Kind:       decision.Kind,
 				Value:      decision.Root,
 				Confidence: decision.Confidence,
 				Reasoned:   true,
-			}) {
+			})
+			if promotion.Decision == models.CandidatePromotionAccepted {
+				newAssets = append(newAssets, models.Asset{
+					ID:            models.NewID("dom-asn-cidr-root"),
+					EnumerationID: enum.ID,
+					Type:          models.AssetTypeDomain,
+					Identifier:    decision.Root,
+					Source:        "asn_cidr_collector",
+					DiscoveryDate: time.Now(),
+					DomainDetails: &models.DomainDetails{},
+				})
+			}
+
+			if promotion.Scheduled {
 				telemetry.Infof(ctx, "[ASN/CIDR Collector] Promoted %s from judged network pivots.", decision.Root)
 			}
 		}

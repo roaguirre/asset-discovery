@@ -291,6 +291,65 @@ func TestCrawlerCollector_SkipsLowConfidenceJudgedOutboundRoot(t *testing.T) {
 	}
 }
 
+// TestCrawlerCollector_DoesNotMaterializePendingReviewOutboundRoot verifies the
+// collector keeps judge-approved outbound roots out of assets until manual pivot
+// review accepts them.
+func TestCrawlerCollector_DoesNotMaterializePendingReviewOutboundRoot(t *testing.T) {
+	collector := NewCrawlerCollector()
+	collector.maxDepth = 1
+	collector.maxPagesPerSeed = 2
+	collector.judge = &stubOwnershipJudge{
+		decisions: []ownership.Decision{
+			{
+				Root:       "example-holdings.com",
+				Kind:       "ownership_judged",
+				Confidence: 0.97,
+			},
+		},
+	}
+	collector.buildStartURLs = func(domain string) []string {
+		return []string{"https://example.com/"}
+	}
+	collector.fetchPage = func(ctx context.Context, target crawlerQueueItem) (*models.CrawlPage, error) {
+		return &models.CrawlPage{
+			URL:      target.URL,
+			FinalURL: target.URL,
+			Links: []models.CrawlLink{
+				{
+					SourceURL:  target.URL,
+					TargetURL:  "https://www.example-holdings.com/about",
+					TargetHost: "www.example-holdings.com",
+					TargetRoot: "example-holdings.com",
+					Relation:   "about",
+				},
+			},
+		}, nil
+	}
+
+	handler := &stubCandidatePromotionHandler{decision: models.CandidatePromotionPendingReview}
+	pCtx := &models.PipelineContext{
+		Seeds: []models.Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+	pCtx.SetCandidatePromotionHandler(handler)
+
+	if _, err := collector.Process(context.Background(), pCtx); err != nil {
+		t.Fatalf("expected collector to succeed, got %v", err)
+	}
+
+	if len(handler.seen) != 1 {
+		t.Fatalf("expected one pending-review promotion request, got %+v", handler.seen)
+	}
+	if assetExists(pCtx.Assets, "example-holdings.com") {
+		t.Fatalf("expected pending-review outbound root to stay out of assets, got %+v", pCtx.Assets)
+	}
+	if seedExists(pCtx.Seeds, "example-holdings.com") {
+		t.Fatalf("expected pending-review outbound root to stay out of seeds, got %+v", pCtx.Seeds)
+	}
+}
+
 func TestExtractCrawlerLinks_ResolvesRelativeLinksAndClassifiesContext(t *testing.T) {
 	baseURL, err := url.Parse("https://example.com/legal/")
 	if err != nil {

@@ -442,6 +442,7 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 		for root, evidences := range signalsByRoot {
 			promoted := false
 			accepted := false
+			materialized := false
 			candidate := discovery.BuildDiscoveredSeed(seed, root, "web-hint-pivot")
 			for _, evidence := range evidences {
 				if !ownership.IsConfidenceAtLeast(
@@ -453,7 +454,11 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 					continue
 				}
 				accepted = true
-				if pCtx.EnqueueSeedCandidate(candidate, evidence) {
+				promotion := pCtx.PromoteSeedCandidate(candidate, evidence)
+				if promotion.Decision == models.CandidatePromotionAccepted {
+					materialized = true
+				}
+				if promotion.Scheduled {
 					promoted = true
 				}
 			}
@@ -462,15 +467,17 @@ func (c *WebHintCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 			}
 			acceptedRoots = append(acceptedRoots, root)
 
-			newAssets = append(newAssets, models.Asset{
-				ID:            models.NewID("dom-web-hint"),
-				EnumerationID: enum.ID,
-				Type:          models.AssetTypeDomain,
-				Identifier:    root,
-				Source:        "web_hint_collector",
-				DiscoveryDate: time.Now(),
-				DomainDetails: &models.DomainDetails{},
-			})
+			if materialized {
+				newAssets = append(newAssets, models.Asset{
+					ID:            models.NewID("dom-web-hint"),
+					EnumerationID: enum.ID,
+					Type:          models.AssetTypeDomain,
+					Identifier:    root,
+					Source:        "web_hint_collector",
+					DiscoveryDate: time.Now(),
+					DomainDetails: &models.DomainDetails{},
+				})
+			}
 
 			if promoted {
 				promotedRoots = append(promotedRoots, root)

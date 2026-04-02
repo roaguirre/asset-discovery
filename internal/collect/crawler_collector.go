@@ -197,23 +197,6 @@ func (c *CrawlerCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 					continue
 				}
 
-				newAssets = append(newAssets, models.Asset{
-					ID:            models.NewID("dom-crawler"),
-					EnumerationID: enum.ID,
-					Type:          models.AssetTypeDomain,
-					Identifier:    decision.Root,
-					Source:        "crawler_collector",
-					DiscoveryDate: c.now(),
-					DomainDetails: &models.DomainDetails{},
-					EnrichmentData: map[string]interface{}{
-						"crawl_kind":           "judged_outbound_root",
-						"crawl_observations":   candidate.ObservationCount,
-						"crawl_relations":      candidate.sortedRelations(),
-						"crawl_samples":        candidate.sampleStrings(3),
-						"ownership_confidence": decision.Confidence,
-					},
-				})
-
 				discoveredSeed := discovery.BuildDiscoveredSeed(seed, decision.Root, "crawler-outbound")
 				discoveredSeed.Evidence = []models.SeedEvidence{
 					{
@@ -224,13 +207,33 @@ func (c *CrawlerCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 					},
 				}
 
-				if pCtx.EnqueueSeedCandidate(discoveredSeed, models.SeedEvidence{
+				promotion := pCtx.PromoteSeedCandidate(discoveredSeed, models.SeedEvidence{
 					Source:     "ownership_judge",
 					Kind:       decision.Kind,
 					Value:      decision.Root,
 					Confidence: decision.Confidence,
 					Reasoned:   true,
-				}) {
+				})
+				if promotion.Decision == models.CandidatePromotionAccepted {
+					newAssets = append(newAssets, models.Asset{
+						ID:            models.NewID("dom-crawler"),
+						EnumerationID: enum.ID,
+						Type:          models.AssetTypeDomain,
+						Identifier:    decision.Root,
+						Source:        "crawler_collector",
+						DiscoveryDate: c.now(),
+						DomainDetails: &models.DomainDetails{},
+						EnrichmentData: map[string]interface{}{
+							"crawl_kind":           "judged_outbound_root",
+							"crawl_observations":   candidate.ObservationCount,
+							"crawl_relations":      candidate.sortedRelations(),
+							"crawl_samples":        candidate.sampleStrings(3),
+							"ownership_confidence": decision.Confidence,
+						},
+					})
+				}
+
+				if promotion.Scheduled {
 					telemetry.Infof(ctx, "[Crawler Collector] Promoted %s from judged outbound links.", decision.Root)
 				}
 			}

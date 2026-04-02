@@ -257,25 +257,28 @@ func (c *ReverseRegistrationCollector) Process(ctx context.Context, pCtx *models
 				continue
 			}
 
-			newAssets = append(newAssets, models.Asset{
-				ID:            models.NewID("dom-revreg"),
-				EnumerationID: enum.ID,
-				Type:          models.AssetTypeDomain,
-				Identifier:    decision.Root,
-				Source:        "reverse_registration_collector",
-				DiscoveryDate: time.Now(),
-				DomainDetails: &models.DomainDetails{
-					RDAP: candidate.rdap,
-				},
-			})
-
-			if pCtx.EnqueueSeedCandidate(candidate.seed, models.SeedEvidence{
+			promotion := pCtx.PromoteSeedCandidate(candidate.seed, models.SeedEvidence{
 				Source:     "ownership_judge",
 				Kind:       decision.Kind,
 				Value:      decision.Root,
 				Confidence: decision.Confidence,
 				Reasoned:   true,
-			}) {
+			})
+			if promotion.Decision == models.CandidatePromotionAccepted {
+				newAssets = append(newAssets, models.Asset{
+					ID:            models.NewID("dom-revreg"),
+					EnumerationID: enum.ID,
+					Type:          models.AssetTypeDomain,
+					Identifier:    decision.Root,
+					Source:        "reverse_registration_collector",
+					DiscoveryDate: time.Now(),
+					DomainDetails: &models.DomainDetails{
+						RDAP: candidate.rdap,
+					},
+				})
+			}
+
+			if promotion.Scheduled {
 				telemetry.Infof(ctx, "[Reverse Registration Collector] Promoted %s from judged registration pivots.", decision.Root)
 			}
 		}

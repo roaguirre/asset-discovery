@@ -2,6 +2,16 @@ package models
 
 import "testing"
 
+type stubCandidatePromotionHandler struct {
+	decision CandidatePromotionDecision
+	seen     []CandidatePromotionRequest
+}
+
+func (h *stubCandidatePromotionHandler) HandleCandidatePromotion(candidate CandidatePromotionRequest) CandidatePromotionDecision {
+	h.seen = append(h.seen, candidate)
+	return h.decision
+}
+
 func TestPipelineContext_InitializeSeedFrontierMergesDuplicateDomainSeeds(t *testing.T) {
 	pCtx := &PipelineContext{
 		Seeds: []Seed{
@@ -193,6 +203,43 @@ func TestPipelineContext_EnqueueSeedCandidatePromotesReasonedDecision(t *testing
 	}
 }
 
+// TestPipelineContext_PromoteSeedCandidateReturnsPendingReviewWithoutScheduling
+// verifies manual-review gating does not leak pending pivots into registered seeds.
+func TestPipelineContext_PromoteSeedCandidateReturnsPendingReviewWithoutScheduling(t *testing.T) {
+	handler := &stubCandidatePromotionHandler{decision: CandidatePromotionPendingReview}
+	pCtx := &PipelineContext{
+		Seeds: []Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(1)
+	pCtx.SetCandidatePromotionHandler(handler)
+
+	result := pCtx.PromoteSeedCandidate(Seed{
+		ID:          "seed-2",
+		CompanyName: "Example Corp",
+		Domains:     []string{"example-holdings.com"},
+	}, SeedEvidence{
+		Source:     "ownership_judge",
+		Kind:       "ownership_judged",
+		Value:      "example-holdings.com",
+		Confidence: 0.91,
+		Reasoned:   true,
+	})
+	if result.Decision != CandidatePromotionPendingReview {
+		t.Fatalf("expected pending-review decision, got %+v", result)
+	}
+	if result.Scheduled {
+		t.Fatalf("expected pending-review decision to avoid scheduling, got %+v", result)
+	}
+	if len(handler.seen) != 1 {
+		t.Fatalf("expected candidate handler to see one promotion request, got %+v", handler.seen)
+	}
+	if len(pCtx.Seeds) != 1 {
+		t.Fatalf("expected pending-review candidate to stay out of registered seeds, got %+v", pCtx.Seeds)
+	}
+}
+
 func TestPipelineContext_ReserveExtraCollectionWaveAllowsOneFinalFrontier(t *testing.T) {
 	pCtx := &PipelineContext{
 		Seeds: []Seed{
@@ -265,6 +312,52 @@ func TestPipelineContext_FinalCollectionWaveRegistersButDoesNotScheduleFurtherSe
 
 	if advanced := pCtx.AdvanceSeedFrontier(); advanced {
 		t.Fatalf("expected no additional frontier after the bounded extra wave")
+	}
+}
+
+// TestPipelineContext_PromoteSeedCandidateAcceptsFinalWaveWithoutScheduling
+// verifies accepted pivots still register during the bounded last wave even when
+// the scheduler is no longer allowed to open another frontier.
+func TestPipelineContext_PromoteSeedCandidateAcceptsFinalWaveWithoutScheduling(t *testing.T) {
+	pCtx := &PipelineContext{
+		Seeds: []Seed{
+			{ID: "seed-1", CompanyName: "Example Corp", Domains: []string{"example.com"}},
+		},
+	}
+	pCtx.InitializeSeedFrontier(0)
+	pCtx.AdvanceSeedFrontier()
+	pCtx.ReserveExtraCollectionWave()
+
+	if promoted := pCtx.EnqueueSeed(Seed{
+		ID:          "seed-2",
+		CompanyName: "Example Subsidiary",
+		Domains:     []string{"example-store.com"},
+	}); !promoted {
+		t.Fatalf("expected extra frontier seed to schedule")
+	}
+	if advanced := pCtx.AdvanceSeedFrontier(); !advanced {
+		t.Fatalf("expected extra frontier to activate")
+	}
+
+	result := pCtx.PromoteSeedCandidate(Seed{
+		ID:          "seed-3",
+		CompanyName: "Example Support",
+		Domains:     []string{"example-support.com"},
+	}, SeedEvidence{
+		Source:     "ownership_judge",
+		Kind:       "ownership_judged",
+		Value:      "example-support.com",
+		Confidence: 0.94,
+		Reasoned:   true,
+	})
+	if result.Decision != CandidatePromotionAccepted {
+		t.Fatalf("expected accepted decision in final wave, got %+v", result)
+	}
+	if result.Scheduled {
+		t.Fatalf("expected final-wave acceptance to avoid opening another frontier, got %+v", result)
+	}
+	if !seedHasDomain(pCtx.Seeds, "example-support.com") {
+		t.Fatalf("expected accepted final-wave seed to be registered, got %+v", pCtx.Seeds)
 	}
 }
 

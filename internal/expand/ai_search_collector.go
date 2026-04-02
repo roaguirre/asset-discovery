@@ -297,28 +297,6 @@ func (c *AISearchCollector) Process(ctx context.Context, pCtx *models.PipelineCo
 					}
 
 					acceptedRoots = appendUniqueString(acceptedRoots, decision.Root)
-					pCtx.AppendAssets(models.Asset{
-						ID:            models.NewID("dom-ai-search"),
-						EnumerationID: enum.ID,
-						Type:          models.AssetTypeDomain,
-						Identifier:    decision.Root,
-						Source:        aiSearchCollectorSource,
-						DiscoveryDate: c.now(),
-						DomainDetails: &models.DomainDetails{},
-					})
-					pCtx.AppendAssetRelations(models.AssetRelation{
-						ID:             models.NewID("rel-ai-search"),
-						EnumerationID:  enum.ID,
-						FromAssetType:  models.AssetTypeDomain,
-						FromIdentifier: focusRoot,
-						ToAssetType:    models.AssetTypeDomain,
-						ToIdentifier:   decision.Root,
-						Source:         aiSearchCollectorSource,
-						Kind:           aiSearchRelationKind,
-						Label:          "Search Result",
-						Reason:         buildSearchRelationReason(result.Queries, candidate),
-						DiscoveryDate:  c.now(),
-					})
 
 					if !ownership.IsConfidenceAtLeast(
 						decision.Confidence,
@@ -329,13 +307,39 @@ func (c *AISearchCollector) Process(ctx context.Context, pCtx *models.PipelineCo
 					}
 
 					discoveredSeed := discovery.BuildDiscoveredSeed(seed, decision.Root, aiSearchSeedTag)
-					if pCtx.EnqueueSeedCandidate(discoveredSeed, models.SeedEvidence{
+					promotion := pCtx.PromoteSeedCandidate(discoveredSeed, models.SeedEvidence{
 						Source:     aiSearchCollectorSource,
 						Kind:       firstNonEmpty(decision.Kind, "ownership_judged"),
 						Value:      decision.Root,
 						Confidence: decision.Confidence,
 						Reasoned:   true,
-					}) {
+					})
+					if promotion.Decision == models.CandidatePromotionAccepted {
+						pCtx.AppendAssets(models.Asset{
+							ID:            models.NewID("dom-ai-search"),
+							EnumerationID: enum.ID,
+							Type:          models.AssetTypeDomain,
+							Identifier:    decision.Root,
+							Source:        aiSearchCollectorSource,
+							DiscoveryDate: c.now(),
+							DomainDetails: &models.DomainDetails{},
+						})
+						pCtx.AppendAssetRelations(models.AssetRelation{
+							ID:             models.NewID("rel-ai-search"),
+							EnumerationID:  enum.ID,
+							FromAssetType:  models.AssetTypeDomain,
+							FromIdentifier: focusRoot,
+							ToAssetType:    models.AssetTypeDomain,
+							ToIdentifier:   decision.Root,
+							Source:         aiSearchCollectorSource,
+							Kind:           aiSearchRelationKind,
+							Label:          "Search Result",
+							Reason:         buildSearchRelationReason(result.Queries, candidate),
+							DiscoveryDate:  c.now(),
+						})
+					}
+
+					if promotion.Scheduled {
 						promotedRoots = appendUniqueString(promotedRoots, decision.Root)
 						telemetry.Infof(ctx, "[AI Search Collector] Promoted %s from judged web search evidence.", decision.Root)
 					}

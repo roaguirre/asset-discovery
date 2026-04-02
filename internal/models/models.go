@@ -76,6 +76,13 @@ type CandidatePromotionRequest struct {
 	Reasoned   bool           `json:"reasoned,omitempty"`
 }
 
+// CandidatePromotionResult reports whether a discovered seed was accepted for
+// registration and whether that acceptance opened another collection frontier.
+type CandidatePromotionResult struct {
+	Decision  CandidatePromotionDecision `json:"decision,omitempty"`
+	Scheduled bool                       `json:"scheduled,omitempty"`
+}
+
 // ExecutionEvent describes a runtime activity update that should be streamed
 // to live observers without relying on infrastructure logs.
 type ExecutionEvent struct {
@@ -501,15 +508,16 @@ func (p *PipelineContext) EnqueueSeed(seed Seed) bool {
 	return false
 }
 
-// EnqueueSeedCandidate records evidence for an auto-discovered seed and promotes it once
-// it has either a reasoned approval, one strong signal, or at least two distinct weaker signals.
-func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence) bool {
+// PromoteSeedCandidate records evidence for an auto-discovered seed and
+// reports whether it was accepted, rejected, or deferred plus whether that
+// acceptance opened another collection frontier.
+func (p *PipelineContext) PromoteSeedCandidate(seed Seed, evidence SeedEvidence) CandidatePromotionResult {
 	p.Lock()
 	defer p.Unlock()
 
 	mode := p.seedSchedulingModeLocked()
 	if mode == seedSchedulingReject {
-		return false
+		return CandidatePromotionResult{}
 	}
 
 	seed = normalizeSeed(seed)
@@ -518,7 +526,7 @@ func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence)
 	key := seedKey(seed)
 	if _, exists := p.knownSeedKeys[key]; exists {
 		p.mergeSeedAcrossSlicesLocked(seed, evidence)
-		return false
+		return CandidatePromotionResult{}
 	}
 
 	candidate, exists := p.candidateSeeds[key]
@@ -560,11 +568,11 @@ func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence)
 
 	if mode == seedSchedulingRegisterOnly && !shouldPromoteSeedCandidate(candidate) {
 		p.materializeSeedCandidateLocked(key, candidate, false)
-		return false
+		return CandidatePromotionResult{}
 	}
 
 	if !shouldPromoteSeedCandidate(candidate) {
-		return false
+		return CandidatePromotionResult{}
 	}
 
 	if p.candidateHandler != nil {
@@ -575,16 +583,31 @@ func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence)
 			Confidence: candidate.maxConfidence,
 			Reasoned:   candidate.reasoned,
 		}
-		switch p.candidateHandler.HandleCandidatePromotion(promotion) {
+		decision := p.candidateHandler.HandleCandidatePromotion(promotion)
+		switch decision {
 		case CandidatePromotionAccepted:
-			return p.materializeSeedCandidateLocked(key, candidate, mode == seedSchedulingNextWave)
+			return CandidatePromotionResult{
+				Decision:  CandidatePromotionAccepted,
+				Scheduled: p.materializeSeedCandidateLocked(key, candidate, mode == seedSchedulingNextWave),
+			}
 		case CandidatePromotionPendingReview, CandidatePromotionRejected:
 			delete(p.candidateSeeds, key)
-			return false
+			return CandidatePromotionResult{
+				Decision: decision,
+			}
 		}
 	}
 
-	return p.materializeSeedCandidateLocked(key, candidate, mode == seedSchedulingNextWave)
+	return CandidatePromotionResult{
+		Decision:  CandidatePromotionAccepted,
+		Scheduled: p.materializeSeedCandidateLocked(key, candidate, mode == seedSchedulingNextWave),
+	}
+}
+
+// EnqueueSeedCandidate records evidence for an auto-discovered seed and promotes it once
+// it has either a reasoned approval, one strong signal, or at least two distinct weaker signals.
+func (p *PipelineContext) EnqueueSeedCandidate(seed Seed, evidence SeedEvidence) bool {
+	return p.PromoteSeedCandidate(seed, evidence).Scheduled
 }
 
 // AdvanceSeedFrontier moves newly discovered seeds into the next collection wave.

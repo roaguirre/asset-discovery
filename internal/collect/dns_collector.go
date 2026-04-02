@@ -543,8 +543,6 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 							evidenceKind = dnsSeedEvidenceKindVariantPivot
 						}
 
-						newAssets = append(newAssets, domainAssetFromObservation(models.NewID("dom-dns-pivot"), enum.ID, decision.Root, source, *pivotCandidate.observation, pivotCandidate.rdap))
-
 						discoveredSeed := discovery.BuildDiscoveredSeed(seed, decision.Root, seedTag)
 						discoveredSeed.Evidence = append(discoveredSeed.Evidence, models.SeedEvidence{
 							Source:     source,
@@ -553,13 +551,18 @@ func (c *DNSCollector) Process(ctx context.Context, pCtx *models.PipelineContext
 							Confidence: decision.Confidence,
 						})
 
-						if pCtx.EnqueueSeedCandidate(discoveredSeed, models.SeedEvidence{
+						promotion := pCtx.PromoteSeedCandidate(discoveredSeed, models.SeedEvidence{
 							Source:     "ownership_judge",
 							Kind:       decision.Kind,
 							Value:      decision.Root,
 							Confidence: decision.Confidence,
 							Reasoned:   true,
-						}) {
+						})
+						if promotion.Decision == models.CandidatePromotionAccepted {
+							newAssets = append(newAssets, domainAssetFromObservation(models.NewID("dom-dns-pivot"), enum.ID, decision.Root, source, *pivotCandidate.observation, pivotCandidate.rdap))
+						}
+
+						if promotion.Scheduled {
 							metricsPromoted++
 							telemetry.Infof(ctx, "[DNS Collector] Promoted %s from judged DNS pivots.", decision.Root)
 						}

@@ -372,16 +372,6 @@ func (c *SitemapCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				continue
 			}
 
-			newAssets = append(newAssets, models.Asset{
-				ID:            models.NewID("dom-sitemap"),
-				EnumerationID: enum.ID,
-				Type:          models.AssetTypeDomain,
-				Identifier:    root,
-				Source:        "sitemap_collector",
-				DiscoveryDate: c.now(),
-				DomainDetails: &models.DomainDetails{},
-			})
-
 			discoveredSeed := discovery.BuildDiscoveredSeed(seed, root, "sitemap-pivot")
 			discoveredSeed.Evidence = append(discoveredSeed.Evidence, models.SeedEvidence{
 				Source:     "sitemap_collector",
@@ -390,13 +380,26 @@ func (c *SitemapCollector) Process(ctx context.Context, pCtx *models.PipelineCon
 				Confidence: decision.Confidence,
 			})
 
-			if pCtx.EnqueueSeedCandidate(discoveredSeed, models.SeedEvidence{
+			promotion := pCtx.PromoteSeedCandidate(discoveredSeed, models.SeedEvidence{
 				Source:     "ownership_judge",
 				Kind:       decision.Kind,
 				Value:      root,
 				Confidence: decision.Confidence,
 				Reasoned:   true,
-			}) {
+			})
+			if promotion.Decision == models.CandidatePromotionAccepted {
+				newAssets = append(newAssets, models.Asset{
+					ID:            models.NewID("dom-sitemap"),
+					EnumerationID: enum.ID,
+					Type:          models.AssetTypeDomain,
+					Identifier:    root,
+					Source:        "sitemap_collector",
+					DiscoveryDate: c.now(),
+					DomainDetails: &models.DomainDetails{},
+				})
+			}
+
+			if promotion.Scheduled {
 				telemetry.Infof(ctx, "[Sitemap Collector] Promoted %s from sitemap host pivots.", root)
 			}
 		}

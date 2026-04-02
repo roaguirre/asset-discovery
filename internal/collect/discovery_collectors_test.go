@@ -21,6 +21,16 @@ type recordingMutationListener struct {
 	events []models.ExecutionEvent
 }
 
+type stubCandidatePromotionHandler struct {
+	decision models.CandidatePromotionDecision
+	seen     []models.CandidatePromotionRequest
+}
+
+func (h *stubCandidatePromotionHandler) HandleCandidatePromotion(candidate models.CandidatePromotionRequest) models.CandidatePromotionDecision {
+	h.seen = append(h.seen, candidate)
+	return h.decision
+}
+
 func (l *recordingMutationListener) OnAssetUpsert(asset models.Asset) {}
 
 func (l *recordingMutationListener) OnObservationAdded(observation models.AssetObservation) {}
