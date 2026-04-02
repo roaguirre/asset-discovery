@@ -104,7 +104,7 @@ Optional worker tuning:
 - Preferred local server command: `make server`
 - Primary verification command: `make validate`
 - Faster iteration command: `go test ./...`
-- Firestore emulator coverage: `make test-firebase`
+- Firestore emulator coverage: `make test-firebase` (also runs during `make validate`)
 - `make validate` may rewrite tracked Go files through `go fmt ./...`; inspect the working tree after it completes
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/runtime-model.md](docs/runtime-model.md) before making structural changes.

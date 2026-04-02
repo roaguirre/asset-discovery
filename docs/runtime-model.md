@@ -114,7 +114,11 @@ Do not collapse those concerns back into one shared struct. The runtime graph ex
 When documentation and code disagree, use the code:
 
 - [`internal/models/models.go`](../internal/models/models.go)
+- [`internal/models/pipeline_context_hooks.go`](../internal/models/pipeline_context_hooks.go)
+- [`internal/models/seed_frontier.go`](../internal/models/seed_frontier.go)
 - [`internal/models/assets.go`](../internal/models/assets.go)
+- [`internal/models/asset_state.go`](../internal/models/asset_state.go)
+- [`internal/models/asset_merge.go`](../internal/models/asset_merge.go)
 - [`internal/models/snapshot.go`](../internal/models/snapshot.go)
 - [`internal/dag/engine.go`](../internal/dag/engine.go)
 - [`internal/runservice/types.go`](../internal/runservice/types.go)

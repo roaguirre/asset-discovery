@@ -49,7 +49,7 @@ This file is the operational guide for AI coding assistants working in this repo
 - `make server` loads `.env.local` before running `go run ./cmd/server`
 - Primary verification command: `make validate`
 - Faster iteration command: `go test ./...`
-- Firestore emulator coverage: `make test-firebase`
+- Firestore emulator coverage: `make test-firebase` and the default `make validate` path
 - `make validate` may rewrite tracked Go files through `go fmt ./...`; inspect the working tree after it completes
 
 ## Stage And Model Changes
