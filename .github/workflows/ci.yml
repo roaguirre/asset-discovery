@@ -74,15 +74,13 @@ jobs:
         run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
 
       - name: Apply Artifact Registry cleanup policy
-        run: |
-          if ! gcloud artifacts repositories set-cleanup-policies "${{ vars.GAR_REPOSITORY }}" \
-            --project "${{ vars.GCP_PROJECT_ID }}" \
-            --location "${{ vars.GCP_REGION }}" \
-            --policy deploy/artifact-registry-cleanup.json \
-            --no-dry-run \
-            --quiet; then
-            echo "::warning::Skipping Artifact Registry cleanup policy update. Grant artifactregistry.repositories.update to the deploy service account to enable this step."
-          fi
+        run: >
+          gcloud artifacts repositories set-cleanup-policies "${{ vars.GAR_REPOSITORY }}"
+          --project "${{ vars.GCP_PROJECT_ID }}"
+          --location "${{ vars.GCP_REGION }}"
+          --policy deploy/artifact-registry-cleanup.json
+          --no-dry-run
+          --quiet
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
