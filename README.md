@@ -106,5 +106,8 @@ Optional worker tuning:
 - Faster iteration command: `go test ./...`
 - Firestore emulator coverage: `make test-firebase` (also runs during `make validate`)
 - `make validate` may rewrite tracked Go files through `go fmt ./...`; inspect the working tree after it completes
+- Production deploys apply the Artifact Registry cleanup policy in
+  `deploy/artifact-registry-cleanup.json` and cap the API Cloud Run service at
+  zero minimum instances and three maximum instances.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/runtime-model.md](docs/runtime-model.md) before making structural changes.

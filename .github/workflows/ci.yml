@@ -67,6 +67,15 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
 
+      - name: Apply Artifact Registry cleanup policy
+        run: >
+          gcloud artifacts repositories set-cleanup-policies "${{ vars.GAR_REPOSITORY }}"
+          --project "${{ vars.GCP_PROJECT_ID }}"
+          --location "${{ vars.GCP_REGION }}"
+          --policy deploy/artifact-registry-cleanup.json
+          --no-dry-run
+          --quiet
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -105,5 +114,7 @@ jobs:
           --image "$API_IMAGE"
           --service-account "${{ vars.RUNTIME_SERVICE_ACCOUNT }}"
           --allow-unauthenticated
+          --min-instances 0
+          --max-instances 3
           --set-secrets "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY_SECRET }}:latest"
           --set-env-vars "^##^ASSET_DISCOVERY_FIREBASE_PROJECT_ID=${{ vars.ASSET_DISCOVERY_FIREBASE_PROJECT_ID }}##ASSET_DISCOVERY_EXPORT_GCS_BUCKET=${{ vars.ASSET_DISCOVERY_EXPORT_GCS_BUCKET }}##ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET=${{ vars.ASSET_DISCOVERY_CHECKPOINT_GCS_BUCKET }}##ASSET_DISCOVERY_EXPORT_GCS_PREFIX=${{ vars.ASSET_DISCOVERY_EXPORT_GCS_PREFIX }}##ASSET_DISCOVERY_ALLOWED_ORIGINS=${{ vars.ASSET_DISCOVERY_ALLOWED_ORIGINS }}##ASSET_DISCOVERY_WORKER_JOB_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}##ASSET_DISCOVERY_WORKER_JOB_REGION=${{ vars.GCP_REGION }}##ASSET_DISCOVERY_WORKER_JOB_NAME=${{ vars.CLOUD_RUN_JOB }}"
